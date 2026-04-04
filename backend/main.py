@@ -256,8 +256,7 @@ class Veh:
         wx, wy, angle = pos_on_road(self.road_id, self.distance)
         self.lx = wx; self.ly = wy; self.angle = angle
     def to_replay(self):
-        canvas_x, canvas_y = world_to_canvas(self.lx, self.ly)
-        return {{"id": self.id, "x": round(canvas_x, 2), "y": round(canvas_y, 2), "road": self.road_id, "angle": round(self.angle, 4)}}
+        return {{"id": self.id, "x": round(self.lx, 4), "y": round(self.ly, 4), "road": self.road_id, "angle": round(self.angle, 4)}}
 
 def run_scenario(scenario):
     ns_flow = scenario["ns_flow"]; ew_flow = scenario["ew_flow"]; duration = scenario["duration"]
@@ -660,12 +659,11 @@ class CityFlowEngine:
                     )
                     distance = float(info.get("distance", 0))
                     wx, wy, angle = road_pos_2d(road_id, distance)
-                    canvas_x, canvas_y = world_to_canvas(wx, wy)
                     vlist.append(
                         {
                             "id": vid,
-                            "x": round(canvas_x, 2),
-                            "y": round(canvas_y, 2),
+                            "x": round(wx, 4),
+                            "y": round(wy, 4),
                             "angle": round(angle, 4),
                         }
                     )
@@ -867,12 +865,11 @@ class SumoEngine:
                         x_sumo, y_sumo = traci.vehicle.getPosition(vid)
                         angle_sumo = traci.vehicle.getAngle(vid)
                         angle_math = math.pi / 2 - math.radians(angle_sumo)
-                        canvas_x, canvas_y = world_to_canvas(x_sumo, y_sumo)
                         vlist.append(
                             {
                                 "id": vid,
-                                "x": round(canvas_x, 2),
-                                "y": round(canvas_y, 2),
+                                "x": round(x_sumo, 4),
+                                "y": round(y_sumo, 4),
                                 "angle": round(angle_math, 4),
                             }
                         )

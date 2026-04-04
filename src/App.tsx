@@ -45,6 +45,7 @@ const CX = W / 2;
 const CY = H / 2;
 const ROAD = 44;
 const LANE_W = 16;
+const SCALE = 0.52; // pixels per meter: 520px / 1000m = 0.52
 
 const ROAD_COLORS: Record<string, string> = {
   road_N: '#5c7a9a',
@@ -173,9 +174,15 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, phase: string, inYello
 }
 
 function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) {
-  for (const v of vehicles) {
+  for (let i = 0; i < vehicles.length; i++) {
+    const v = vehicles[i];
     ctx.save();
-    ctx.translate(v.x, v.y);
+    const screenX = CX + v.x * SCALE;
+    const screenY = CY - v.y * SCALE;
+    if (i === 0) {
+      console.log(`Vehicle 0: world=(${v.x.toFixed(1)}, ${v.y.toFixed(1)}) screen=(${screenX.toFixed(1)}, ${screenY.toFixed(1)}) angle=${v.angle.toFixed(3)}`);
+    }
+    ctx.translate(screenX, screenY);
     ctx.rotate(v.angle);
 
     const w = 7, h = 13;
@@ -184,15 +191,12 @@ function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) 
     ctx.roundRect(-w / 2, -h / 2, w, h, 2);
     ctx.fill();
 
-    // Windshield
     ctx.fillStyle = 'rgba(200,230,255,0.55)';
     ctx.fillRect(-w / 2 + 1, -h / 2 + 2, w - 2, 3);
 
-    // Tail lights
     ctx.fillStyle = 'rgba(255,50,50,0.4)';
     ctx.fillRect(-w / 2 + 1, h / 2 - 3, 2, 2);
     ctx.fillRect(w / 2 - 3, h / 2 - 3, 2, 2);
-
     ctx.restore();
   }
 }
