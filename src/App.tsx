@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Play, Pause, RotateCcw, ChevronRight, Activity, Zap, Trophy, Users } from 'lucide-react';
+import { Play, Pause, RotateCcw, ChevronRight, Activity, Zap, Trophy, Users, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -10,6 +10,7 @@ interface VehicleReplay {
   y: number;
   road: string;
   angle: number;
+  color?: string;
 }
 
 interface TickFrame {
@@ -18,6 +19,7 @@ interface TickFrame {
   phase: 'NS' | 'EW';
   in_yellow: boolean;
   queues: { N: number; S: number; E: number; W: number };
+  lights?: { N?: string; S?: string; E?: string; W?: string };
 }
 
 interface ScenarioResult {
@@ -36,6 +38,23 @@ interface LeaderEntry {
   score: number;
   date: string;
 }
+
+interface EvalDetail {
+  level: number;
+  status: string;
+  score: number;
+  total_delay: number;
+  max_queue_length: number;
+  throughput: number;
+}
+
+const LEVEL_NAMES: Record<number, string> = {
+  1: 'Low Traffic',
+  2: 'Balanced',
+  3: 'N/S Heavy',
+  4: 'E/W Heavy',
+  5: 'Rush Hour',
+};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -79,71 +98,100 @@ const MOCK_LEADERBOARD: LeaderEntry[] = [
 
 // ── Canvas Drawing ───────────────────────────────────────────────────────────
 
-function drawRoads(ctx: CanvasRenderingContext2D) {
-  // Background
-  ctx.fillStyle = '#1a1f1a';
-  ctx.fillRect(0, 0, W, H);
+function drawRoads(ctx: CanvasRenderingContext2D, q: {N:number;S:number;E:number;W:number} = {N:0,S:0,E:0,W:0}) {
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  const CX = W / 2;
+  const CY = H / 2;
+  const ROAD = 44;
+  const LANE = 16;
 
-  // Road surfaces (dark gray)
+  // Background & Surface
+  ctx.fillStyle = '#1a1f1a'; ctx.fillRect(0,0,W,H);
   ctx.fillStyle = '#2a2a2a';
-  ctx.fillRect(CX - ROAD, 0, ROAD * 2, H);
-  ctx.fillRect(0, CY - ROAD, W, ROAD * 2);
-  ctx.fillRect(CX - ROAD, CY - ROAD, ROAD * 2, ROAD * 2);
+  ctx.fillRect(CX-ROAD, 0, ROAD*2, H);
+  ctx.fillRect(0, CY-ROAD, W, ROAD*2);
+  ctx.fillRect(CX-ROAD, CY-ROAD, ROAD*2, ROAD*2);
 
-  // Lane dividers (dashed yellow)
-  ctx.strokeStyle = '#aa8800';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([8, 10]);
-  // Vertical road: center divider
-  ctx.beginPath(); ctx.moveTo(CX, 0); ctx.lineTo(CX, CY - ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX, CY + ROAD); ctx.lineTo(CX, H); ctx.stroke();
-  // Horizontal road: center divider
-  ctx.beginPath(); ctx.moveTo(0, CY); ctx.lineTo(CX - ROAD, CY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, CY); ctx.lineTo(W, CY); ctx.stroke();
+  // BUG 2 FIX: Correct Queue Tint mapping (Congestion Highlights)
+  const qTint = (x: number, y: number, w: number, h: number, count: number) => {
+    if(count < 2) return;
+    const alpha = Math.min(0.35, count / 12);
+    ctx.fillStyle = `rgba(255,69,69,${alpha})`;
+    ctx.fillRect(x,y,w,h);
+  };
+  // N comes from BOTTOM -> tint bottom-left lane
+  qTint(CX-ROAD, CY+ROAD, ROAD, H-CY-ROAD, q.N);
+  // S comes from TOP -> tint top-right lane
+  qTint(CX, 0, ROAD, CY-ROAD, q.S);
+  // E comes from LEFT -> tint bottom-left lane (horizontal)
+  qTint(0, CY, CX-ROAD, ROAD, q.E);
+  // W comes from RIGHT -> tint top-right lane (horizontal)
+  qTint(CX+ROAD, CY-ROAD, W-CX-ROAD, ROAD, q.W);
+
+  // Lane dashes
+  ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.setLineDash([10,12]);
+  ctx.beginPath(); ctx.moveTo(CX,0); ctx.lineTo(CX,CY-ROAD); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX,CY+ROAD); ctx.lineTo(CX,H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,CY); ctx.lineTo(CX-ROAD,CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+ROAD,CY); ctx.lineTo(W,CY); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Lane edge lines (white, solid)
-  ctx.strokeStyle = '#555';
-  ctx.lineWidth = 1;
-  // Vertical road edges
-  ctx.beginPath(); ctx.moveTo(CX - ROAD, 0); ctx.lineTo(CX - ROAD, CY - ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX - ROAD, CY + ROAD); ctx.lineTo(CX - ROAD, H); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, 0); ctx.lineTo(CX + ROAD, CY - ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, CY + ROAD); ctx.lineTo(CX + ROAD, H); ctx.stroke();
-  // Horizontal road edges
-  ctx.beginPath(); ctx.moveTo(0, CY - ROAD); ctx.lineTo(CX - ROAD, CY - ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, CY - ROAD); ctx.lineTo(W, CY - ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0, CY + ROAD); ctx.lineTo(CX - ROAD, CY + ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, CY + ROAD); ctx.lineTo(W, CY + ROAD); ctx.stroke();
+  // BUG 4 FIX: Correct Stop Lines (Half-road alignment)
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(CX-ROAD, CY+ROAD+2); ctx.lineTo(CX, CY+ROAD+2); ctx.stroke(); // N (bottom left half)
 
-  // Stop lines (white, solid)
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
-  // NS stop lines (for vehicles going south on road_N, stop at CY - ROAD)
-  ctx.beginPath(); ctx.moveTo(CX, CY - ROAD); ctx.lineTo(CX + ROAD, CY - ROAD); ctx.stroke();
-  // NS stop lines (for vehicles going north on road_S, stop at CY + ROAD)
-  ctx.beginPath(); ctx.moveTo(CX - ROAD, CY + ROAD); ctx.lineTo(CX, CY + ROAD); ctx.stroke();
-  // EW stop lines (for vehicles going west on road_E, stop at CX + ROAD)
-  ctx.beginPath(); ctx.moveTo(CX + ROAD, CY - ROAD); ctx.lineTo(CX + ROAD, CY); ctx.stroke();
-  // EW stop lines (for vehicles going east on road_W, stop at CX - ROAD)
-  ctx.beginPath(); ctx.moveTo(CX - ROAD, CY); ctx.lineTo(CX - ROAD, CY + ROAD); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(CX, CY-ROAD-2); ctx.lineTo(CX+ROAD, CY-ROAD-2); ctx.stroke(); // S (top right half)
 
-  // Direction arrows
-  ctx.fillStyle = '#444';
-  ctx.font = '16px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  // South arrow (road_N lane)
-  ctx.fillText('\u2193', CX + LANE_W/2, CY - ROAD - 30);
-  // North arrow (road_S lane)
-  ctx.fillText('\u2191', CX - LANE_W/2, CY + ROAD + 30);
-  // West arrow (road_E lane)
-  ctx.fillText('\u2190', CX + ROAD + 30, CY - LANE_W/2);
-  // East arrow (road_W lane)
-  ctx.fillText('\u2192', CX - ROAD - 30, CY + LANE_W/2);
+  ctx.beginPath();
+  ctx.moveTo(CX-ROAD-2, CY); ctx.lineTo(CX-ROAD-2, CY+ROAD); ctx.stroke(); // E (left bottom half)
+
+  ctx.beginPath();
+  ctx.moveTo(CX+ROAD+2, CY-ROAD); ctx.lineTo(CX+ROAD+2, CY); ctx.stroke(); // W (right top half)
+
+  // BUG 3 FIX: Correct Direction Labels
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.font = '11px IBM Plex Mono, monospace';
+  ctx.textAlign='center';
+  ctx.fillText('N', CX - LANE/2, H - 6);       // N comes from Bottom
+  ctx.fillText('S', CX + LANE/2, 16);          // S comes from Top
+  ctx.fillText('E', 16, CY + LANE/2 + 12);     // E comes from Left
+  ctx.fillText('W', W - 16, CY - LANE/2 - 2);  // W comes from Right
 }
 
-function drawTrafficLights(ctx: CanvasRenderingContext2D, phase: string, inYellow: boolean) {
+function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  const CX = W / 2;
+  const CY = H / 2;
+  const ROAD = 44;
+
+  const phase = frame?.phase ?? 'NS';
+  const inYellow = frame?.in_yellow ?? false;
+  const lights = frame?.lights;
+
+  const drawLight = (offsetX: number, offsetY: number, state: string) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(CX + offsetX, CY + offsetY, 6, 0, Math.PI * 2);
+    const s = state.toLowerCase();
+    ctx.fillStyle = s === 'g' ? '#00FF00' : s === 'y' ? '#FFFF00' : '#FF0000';
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.shadowBlur = 10;
+    ctx.fill();
+    ctx.restore();
+  };
+
+  if (lights) {
+    drawLight(ROAD + 10, -ROAD - 10, lights.N || 'r');
+    drawLight(-ROAD - 10, ROAD + 10, lights.S || 'r');
+    drawLight(ROAD + 10, ROAD + 10, lights.E || 'r');
+    drawLight(-ROAD - 10, -ROAD - 10, lights.W || 'r');
+    return;
+  }
+
   const positions = [
     { x: CX + ROAD + 8, y: CY - ROAD - 8, isNS: true },
     { x: CX - ROAD - 8, y: CY + ROAD + 8, isNS: true },
@@ -174,35 +222,37 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, phase: string, inYello
 }
 
 function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) {
-  for (let i = 0; i < vehicles.length; i++) {
-    const v = vehicles[i];
+  const CX = ctx.canvas.width / 2;
+  const CY = ctx.canvas.height / 2;
+
+  for (const v of vehicles) {
+    if (v.x === undefined || v.y === undefined) continue;
+
     ctx.save();
-    const screenX = CX + v.x * SCALE;
-    const screenY = CY - v.y * SCALE;
-    if (i === 0) {
-      console.log(`Vehicle 0: world=(${v.x.toFixed(1)}, ${v.y.toFixed(1)}) screen=(${screenX.toFixed(1)}, ${screenY.toFixed(1)}) angle=${v.angle.toFixed(3)}`);
-    }
+
+    const screenX = CX + (v.x * SCALE);
+    const screenY = CY - (v.y * SCALE);
+
     ctx.translate(screenX, screenY);
-    ctx.rotate(v.angle);
+    ctx.rotate(v.angle || 0);
 
-    const w = 7, h = 13;
-    ctx.fillStyle = ROAD_COLORS[v.road] || '#8a7a5c';
-    ctx.beginPath();
-    ctx.roundRect(-w / 2, -h / 2, w, h, 2);
-    ctx.fill();
+    ctx.fillStyle = v.color || 'white';
+    ctx.fillRect(-4, -8, 8, 16);
 
-    ctx.fillStyle = 'rgba(200,230,255,0.55)';
-    ctx.fillRect(-w / 2 + 1, -h / 2 + 2, w - 2, 3);
-
-    ctx.fillStyle = 'rgba(255,50,50,0.4)';
-    ctx.fillRect(-w / 2 + 1, h / 2 - 3, 2, 2);
-    ctx.fillRect(w / 2 - 3, h / 2 - 3, 2, 2);
     ctx.restore();
   }
 }
 
 function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
-  drawRoads(ctx);
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  const CX = W / 2;
+  const CY = H / 2;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  drawRoads(ctx, frame?.queues ?? {N:0, S:0, E:0, W:0});
 
   if (!frame) {
     ctx.fillStyle = '#555';
@@ -213,10 +263,9 @@ function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
     return;
   }
 
-  drawTrafficLights(ctx, frame.phase, frame.in_yellow);
+  drawTrafficLights(ctx, frame);
   drawVehicles(ctx, frame.vehicles);
 
-  // Debug overlay
   ctx.fillStyle = '#c8ff00';
   ctx.font = '11px "IBM Plex Mono", monospace';
   ctx.textAlign = 'left';
@@ -228,10 +277,12 @@ function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'sim' | 'judge' | 'lb'>('sim');
+  const [engineType, setEngineType] = useState<'python' | 'sumo'>('python');
   const [code, setCode] = useState(DEFAULT_CODE);
   const [isJudging, setIsJudging] = useState(false);
   const [overallScore, setOverallScore] = useState<number | null>(null);
   const [results, setResults] = useState<ScenarioResult[]>([]);
+  const [evalDetails, setEvalDetails] = useState<EvalDetail[]>([]);
   const [selectedScenario, setSelectedScenario] = useState<number | null>(null);
 
   const [playing, setPlaying] = useState(false);
@@ -251,11 +302,29 @@ export default function App() {
 
   // Draw directly - no state dependency
   const draw = useCallback((frame: TickFrame | null) => {
+    try {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      // Ensure explicit internal resolution
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      renderFrame(ctx, frame);
+    } catch (err) {
+      console.error('Canvas draw error:', err);
+    }
+  }, []);
+
+  // Ensure canvas is set up on mount
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    canvas.width = W;
+    canvas.height = H;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    renderFrame(ctx, frame);
+    renderFrame(ctx, null);
   }, []);
 
   // Draw whenever currentFrame changes
@@ -272,34 +341,46 @@ export default function App() {
 
     if (!playing || framesRef.current.length === 0) return;
 
+    // Ensure canvas has explicit internal resolution
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.width = W;
+      canvas.height = H;
+    }
+
     lastTsRef.current = 0;
 
     const loop = (ts: number) => {
-      if (!playingRef.current) return;
+      try {
+        if (!playingRef.current) return;
 
-      if (!lastTsRef.current) lastTsRef.current = ts;
-      const dt = Math.min((ts - lastTsRef.current) / 1000, 0.1);
-      lastTsRef.current = ts;
+        if (!lastTsRef.current) lastTsRef.current = ts;
+        const dt = Math.min((ts - lastTsRef.current) / 1000, 0.1);
+        lastTsRef.current = ts;
 
-      const frames = framesRef.current;
-      if (frames.length === 0) return;
+        const frames = framesRef.current;
+        if (frames.length === 0) return;
 
-      tickRef.current += dt * speedRef.current;
+        tickRef.current += dt * speedRef.current;
 
-      if (tickRef.current >= frames.length - 1) {
-        tickRef.current = frames.length - 1;
-        const last = frames[frames.length - 1];
-        setCurrentFrame(last);
-        draw(last);
+        if (tickRef.current >= frames.length - 1) {
+          tickRef.current = frames.length - 1;
+          const last = frames[frames.length - 1];
+          setCurrentFrame(last);
+          draw(last);
+          setPlaying(false);
+          return;
+        }
+
+        const frame = frames[Math.floor(tickRef.current)];
+        setCurrentFrame(frame);
+        draw(frame);
+
+        rafRef.current = requestAnimationFrame(loop);
+      } catch (err) {
+        console.error('Playback loop error:', err);
         setPlaying(false);
-        return;
       }
-
-      const frame = frames[Math.floor(tickRef.current)];
-      setCurrentFrame(frame);
-      draw(frame);
-
-      rafRef.current = requestAnimationFrame(loop);
     };
 
     rafRef.current = requestAnimationFrame(loop);
@@ -318,6 +399,7 @@ export default function App() {
     setIsJudging(true);
     setOverallScore(null);
     setResults([]);
+    setEvalDetails([]);
     setSelectedScenario(null);
     setCurrentFrame(null);
     setPlaying(false);
@@ -329,10 +411,10 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('http://localhost:8000/submit', {
+      const res = await fetch('http://localhost:8000/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ code, engine_type: engineType }),
       });
 
       if (!res.ok) {
@@ -343,20 +425,29 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      setOverallScore(data.overall_score);
-      setResults(data.scenarios);
+      const hasNewFormat = 'final_score' in data && 'details' in data;
 
-      const firstValid = data.scenarios.findIndex(
-        (s: ScenarioResult) => s.replay_data && s.replay_data.length > 0
-      );
-      if (firstValid >= 0) {
-        const frames = data.scenarios[firstValid].replay_data;
-        framesRef.current = frames;
-        tickRef.current = 0;
-        setSelectedScenario(firstValid);
-        setCurrentFrame(frames[0]);
-        setActiveTab('sim');
-        setPlaying(true);
+      if (hasNewFormat) {
+        setOverallScore(data.final_score);
+        setEvalDetails(data.details ?? []);
+        setResults([]);
+      } else {
+        setOverallScore(data.overall_score);
+        setResults(data.scenarios);
+        setEvalDetails([]);
+
+        const firstValid = data.scenarios.findIndex(
+          (s: ScenarioResult) => s.replay_data && s.replay_data.length > 0
+        );
+        if (firstValid >= 0) {
+          const frames = data.scenarios[firstValid].replay_data;
+          framesRef.current = frames;
+          tickRef.current = 0;
+          setSelectedScenario(firstValid);
+          setCurrentFrame(frames[0]);
+          setActiveTab('sim');
+          setPlaying(true);
+        }
       }
     } catch (err: any) {
       alert(`Error: ${err.message}`);
@@ -597,12 +688,22 @@ export default function App() {
               <div className="flex-1 flex flex-col border-r border-zinc-800">
                 <div className="h-10 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 justify-between">
                   <span className="text-[11px] font-mono text-zinc-400">controller.py</span>
-                  <button
-                    onClick={() => setCode(DEFAULT_CODE)}
-                    className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700"
-                  >
-                    Reset
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={engineType}
+                      onChange={(e) => setEngineType(e.target.value as 'python' | 'sumo')}
+                      className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded border border-zinc-700 text-zinc-300"
+                    >
+                      <option value="python">Python Sim</option>
+                      <option value="sumo">SUMO</option>
+                    </select>
+                    <button
+                      onClick={() => setCode(DEFAULT_CODE)}
+                      className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700"
+                    >
+                      Reset
+                    </button>
+                  </div>
                 </div>
                 <textarea
                   value={code}
@@ -621,7 +722,7 @@ export default function App() {
                   </button>
                   <span className="text-[10px] font-mono text-zinc-500">
                     {isJudging
-                      ? 'Running simulation...'
+                      ? 'Running 5 simulations...'
                       : overallScore !== null
                       ? `Score: ${overallScore}/100`
                       : 'Ready for submission'}
@@ -629,61 +730,138 @@ export default function App() {
                 </div>
               </div>
 
-              <aside className="w-72 bg-zinc-900 flex flex-col overflow-y-auto">
-                <div className="p-8 border-b border-zinc-800 text-center">
-                  <div className={`text-5xl font-mono font-bold mb-1 ${overallScore !== null && overallScore > 80 ? 'text-emerald-500' : 'text-zinc-100'}`}>
-                    {overallScore !== null ? overallScore : '—'}
-                  </div>
-                  <div className="text-[11px] font-mono text-zinc-500">/ 100</div>
-                  <div className="text-[9px] font-mono text-zinc-600 mt-4 uppercase tracking-widest">
-                    {overallScore !== null ? 'EVALUATION COMPLETE' : 'SUBMIT TO SEE SCORE'}
-                  </div>
-                </div>
-
-                <div className="p-4 border-b border-zinc-800">
-                  <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                    Scenarios
-                  </div>
-                  {results.length === 0 ? (
-                    <div className="text-[10px] font-mono text-zinc-600">
-                      No results yet. Submit code to evaluate.
+              <aside className="w-80 bg-zinc-900 flex flex-col overflow-y-auto">
+                {isJudging ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-8">
+                    <Loader2 size={32} className="text-[#c8ff00] animate-spin mb-4" />
+                    <div className="text-[12px] font-mono text-zinc-300 text-center leading-relaxed">
+                      Running simulations across 5 difficulty levels...
                     </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {results.map((s, i) => (
-                        <button
-                          key={i}
-                          onClick={() => selectScenario(i)}
-                          className="w-full text-left flex items-center gap-3 p-2 bg-black/20 rounded border border-zinc-800/50 hover:border-zinc-600 transition-all"
-                        >
-                          <div className="flex-1">
-                            <div className="text-[10px] font-mono text-zinc-300 mb-1">{s.name}</div>
-                            <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-500 ${s.score >= 80 ? 'bg-emerald-500' : s.score >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}
-                                style={{ width: `${s.score}%` }}
-                              />
-                            </div>
+                    <div className="text-[10px] font-mono text-zinc-600 mt-2">Please wait</div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-8 border-b border-zinc-800 text-center">
+                      <div className={`text-5xl font-mono font-bold mb-1 ${
+                        overallScore !== null
+                          ? overallScore >= 80 ? 'text-emerald-400 drop-shadow-[0_0_20px_rgba(52,211,153,0.5)]'
+                          : overallScore >= 60 ? 'text-amber-400 drop-shadow-[0_0_20px_rgba(251,191,36,0.5)]'
+                          : 'text-red-400 drop-shadow-[0_0_20px_rgba(248,113,113,0.5)]'
+                          : 'text-zinc-100'
+                      }`}>
+                        {overallScore !== null ? overallScore : '—'}
+                      </div>
+                      <div className="text-[11px] font-mono text-zinc-500">/ 100</div>
+                      <div className="text-[9px] font-mono text-zinc-600 mt-4 uppercase tracking-widest">
+                        {overallScore !== null ? 'EVALUATION COMPLETE' : 'SUBMIT TO SEE SCORE'}
+                      </div>
+                    </div>
+
+                    <div className="p-4 border-b border-zinc-800">
+                      <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
+                        Scenario Breakdown
+                      </div>
+                      {evalDetails.length === 0 ? (
+                        results.length === 0 ? (
+                          <div className="text-[10px] font-mono text-zinc-600">
+                            No results yet. Submit code to evaluate.
                           </div>
-                          <div className="text-[10px] font-mono text-zinc-500 w-8 text-right">{s.score}</div>
-                          <ChevronRight size={12} className="text-zinc-600" />
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {results.map((s, i) => (
+                              <button
+                                key={i}
+                                onClick={() => selectScenario(i)}
+                                className="w-full text-left flex items-center gap-3 p-2 bg-black/20 rounded border border-zinc-800/50 hover:border-zinc-600 transition-all"
+                              >
+                                <div className="flex-1">
+                                  <div className="text-[10px] font-mono text-zinc-300 mb-1">{s.name}</div>
+                                  <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full transition-all duration-500 ${s.score >= 80 ? 'bg-emerald-500' : s.score >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}
+                                      style={{ width: `${s.score}%` }}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="text-[10px] font-mono text-zinc-500 w-8 text-right">{s.score}</div>
+                                <ChevronRight size={12} className="text-zinc-600" />
+                              </button>
+                            ))}
+                          </div>
+                        )
+                      ) : (
+                        <div className="space-y-2.5">
+                          {evalDetails.map((d, i) => {
+                            const name = LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
+                            const statusOk = d.status === 'OK';
+                            const scoreColor = d.score >= 80 ? 'text-emerald-400' : d.score >= 60 ? 'text-amber-400' : 'text-red-400';
+                            const barColor = d.score >= 80 ? 'bg-emerald-500' : d.score >= 60 ? 'bg-amber-500' : 'bg-red-500';
 
-                <div className="p-4">
-                  <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                    How It Works
-                  </div>
-                  <div className="text-[10px] font-mono text-zinc-500 leading-relaxed space-y-2">
-                    <p>1. Write a <code className="text-[#c8ff00]">control()</code> function in Python.</p>
-                    <p>2. Click RUN JUDGE to submit.</p>
-                    <p>3. The backend runs a real traffic simulation for 5 scenarios.</p>
-                    <p>4. Click any scenario to watch the replay.</p>
-                  </div>
-                </div>
+                            return (
+                              <div
+                                key={i}
+                                className="bg-black/30 rounded-lg border border-zinc-800/60 p-3 hover:border-zinc-700 transition-all"
+                              >
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-mono text-zinc-500">L{d.level}</span>
+                                    <span className="text-[11px] font-mono font-semibold text-zinc-200">{name}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                      statusOk
+                                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                        : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                                    }`}>
+                                      {d.status}
+                                    </span>
+                                    <span className={`text-[11px] font-mono font-bold ${scoreColor}`}>
+                                      {d.score ?? '—'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mb-2.5">
+                                  <div
+                                    className={`h-full rounded-full transition-all duration-700 ${barColor}`}
+                                    style={{ width: `${Math.min(100, d.score ?? 0)}%` }}
+                                  />
+                                </div>
+
+                                <div className="flex gap-1.5">
+                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
+                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Delay</div>
+                                    <div className="text-[10px] font-mono text-zinc-300">{d.total_delay ?? '—'}</div>
+                                  </div>
+                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
+                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Max Q</div>
+                                    <div className="text-[10px] font-mono text-zinc-300">{d.max_queue_length ?? '—'}</div>
+                                  </div>
+                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
+                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Through</div>
+                                    <div className="text-[10px] font-mono text-zinc-300">{d.throughput ?? '—'}</div>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="p-4">
+                      <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
+                        How It Works
+                      </div>
+                      <div className="text-[10px] font-mono text-zinc-500 leading-relaxed space-y-2">
+                        <p>1. Write a <code className="text-[#c8ff00]">control()</code> function in Python.</p>
+                        <p>2. Click RUN JUDGE to submit.</p>
+                        <p>3. The backend runs a real traffic simulation for 5 scenarios.</p>
+                        <p>4. Click any scenario to watch the replay.</p>
+                      </div>
+                    </div>
+                  </>
+                )}
               </aside>
             </motion.div>
           )}
