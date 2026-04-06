@@ -472,7 +472,7 @@ class SumoSimulationEngine:
             "throughput": throughput,
         }
 
-    def get_replay_frame(self, tick: int) -> Dict[str, Any]:
+    def get_replay_frame(self, tick: int, phase: str, in_yellow: bool, queues: Dict[str, int]) -> Dict[str, Any]:
         """
         Capture a single replay frame with vehicles and light states.
         x, y are raw world meters: (0,0) = intersection center, +Y = North, +X = East.
@@ -519,6 +519,9 @@ class SumoSimulationEngine:
             "tick": tick,
             "lights": lights,
             "vehicles": vehicles,
+            "phase": phase,
+            "in_yellow": in_yellow,
+            "queues": queues
         }
 
     def close(self):
@@ -609,6 +612,7 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
 
         # ── Phase tracking ──────────────────────────────────────────────
         current_phase = PHASE_NS_GREEN
+        last_green_phase = PHASE_NS_GREEN
         phase_timer = 0
         phase_duration = DEFAULT_NS_DURATION
         cumulative_delay = 0.0
@@ -648,8 +652,24 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                     "replay_data": replay_data,
                 }
 
+            # Gather Queues (Halting Number)
+            queues = {"N": 0, "S": 0, "E": 0, "W": 0}
+            for edge, d in zip(["N_to_C", "S_to_C", "E_to_C", "W_to_C"], ["N", "S", "E", "W"]):
+                try:
+                    queues[d] = engine.traci.edge.getLastStepHaltingNumber(edge)
+                except Exception:
+                    pass
+            
+            # Map state for UI and Contestant
+            if current_phase == PHASE_NS_GREEN:
+                phase_str, in_yellow = 'NS', False
+            elif current_phase == PHASE_EW_GREEN:
+                phase_str, in_yellow = 'EW', False
+            else:
+                phase_str, in_yellow = ('NS' if last_green_phase == PHASE_NS_GREEN else 'EW'), True
+
             # Capture replay frame (vehicles + lights at raw world coords)
-            replay_data.append(engine.get_replay_frame(tick))
+            replay_data.append(engine.get_replay_frame(tick, phase_str, in_yellow, queues))
 
             # Send to contestant
             light_states = engine.get_light_states()
@@ -657,6 +677,9 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                 "tick": tick,
                 "lights": light_states,
                 "sensor_events": sensor_events,
+                "queues": queues,
+                "phase": phase_str,
+                "phase_timer": phase_timer,
             }
 
             try:
@@ -706,18 +729,14 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                     # Switch to opposite green
                     current_phase = (
                         PHASE_EW_GREEN
-                        if current_phase == PHASE_YELLOW
+                        if last_green_phase == PHASE_NS_GREEN
                         else PHASE_NS_GREEN
                     )
-                    # Actually alternate properly
-                    if phase_duration == YELLOW_DURATION:
-                        # We came from a green phase, switch to the other green
-                        current_phase = PHASE_EW_GREEN
-                        phase_duration = DEFAULT_EW_DURATION
-                    else:
-                        current_phase = PHASE_NS_GREEN
-                        phase_duration = DEFAULT_NS_DURATION
+                    last_green_phase = current_phase
+                    phase_duration = DEFAULT_EW_DURATION if current_phase == PHASE_EW_GREEN else DEFAULT_NS_DURATION
                 else:
+                    # We are on a green phase, enter yellow
+                    last_green_phase = current_phase
                     current_phase = PHASE_YELLOW
                     phase_duration = YELLOW_DURATION
                 phase_timer = 0
