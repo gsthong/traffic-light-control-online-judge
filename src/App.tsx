@@ -8,6 +8,9 @@ interface VehicleReplay {
   id: string;
   x: number;
   y: number;
+  /** Precomputed canvas pixels from backend (preferred). */
+  px?: number;
+  py?: number;
   road: string;
   angle: number;
   color?: string;
@@ -46,13 +49,20 @@ interface EvalDetail {
   total_delay: number;
   max_queue_length: number;
   throughput: number;
+  error?: string;
+  error_log?: string;
+  replay_data?: TickFrame[];
+  ticks_completed?: number;
+  level_label?: string;
+  spawn_rate?: number;
+  bus_ratio?: number;
 }
 
 const LEVEL_NAMES: Record<number, string> = {
   1: 'Low Traffic',
-  2: 'Balanced',
-  3: 'N/S Heavy',
-  4: 'E/W Heavy',
+  2: 'Light Traffic',
+  3: 'Balanced',
+  4: 'Heavy Traffic',
   5: 'Rush Hour',
 };
 
@@ -60,11 +70,15 @@ const LEVEL_NAMES: Record<number, string> = {
 
 const W = 520;
 const H = 520;
-const CX = W / 2;
-const CY = H / 2;
-const ROAD = 44;
-const LANE_W = 16;
-const SCALE = 0.52; // pixels per meter: 520px / 1000m = 0.52
+/** SUMO net: ±WORLD_HALF_M m from junction C along each arm (must match evaluator). */
+const WORLD_HALF_M = 500;
+/** Pixels per metre — same as backend REPLAY_SCALE_PX_PER_M. */
+const SCALE = 0.52;
+/** Road arm length from center in pixels (500 m × scale). */
+const ARM_PX = WORLD_HALF_M * SCALE;
+/** Schematic half-width of paved surface at 520px canvas (lanes visible, not 1:1 m). */
+const ROAD_HALF_PX = 22;
+const STOP_LINE_M = 28;
 
 const ROAD_COLORS: Record<string, string> = {
   road_N: '#5c7a9a',
@@ -99,74 +113,135 @@ const MOCK_LEADERBOARD: LeaderEntry[] = [
 // ── Canvas Drawing ───────────────────────────────────────────────────────────
 
 function drawRoads(ctx: CanvasRenderingContext2D, q: {N:number;S:number;E:number;W:number} = {N:0,S:0,E:0,W:0}) {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
-  const CX = W / 2;
-  const CY = H / 2;
-  const ROAD = 44;
-  const LANE = 16;
+  const Wc = ctx.canvas.width;
+  const Hc = ctx.canvas.height;
+  const s = Math.min(Wc / W, Hc / H);
+  const cx = Wc / 2;
+  const cy = Hc / 2;
+  const arm = ARM_PX * s;
+  const halfW = ROAD_HALF_PX * s;
+  const lane = 7 * s;
+  const stopPx = STOP_LINE_M * SCALE * s;
+  const LINE_WHITE = 'rgba(255,255,255,0.85)';
+  const LINE_YELLOW = 'rgba(234, 179, 8, 0.95)';
 
-  // Background & Surface
-  ctx.fillStyle = '#1a1f1a'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, Wc, Hc);
+
+  // Pavement: same geographic span as SUMO (±WORLD_HALF_M m → ±ARM_PX px).
+  ctx.fillStyle = '#1a1f1a';
+  ctx.fillRect(cx - halfW, cy - arm, 2 * halfW, 2 * arm);
+  ctx.fillRect(cx - arm, cy - halfW, 2 * arm, 2 * halfW);
   ctx.fillStyle = '#2a2a2a';
-  ctx.fillRect(CX-ROAD, 0, ROAD*2, H);
-  ctx.fillRect(0, CY-ROAD, W, ROAD*2);
-  ctx.fillRect(CX-ROAD, CY-ROAD, ROAD*2, ROAD*2);
+  ctx.fillRect(cx - halfW, cy - arm, 2 * halfW, 2 * arm);
+  ctx.fillRect(cx - arm, cy - halfW, 2 * arm, 2 * halfW);
 
-  // BUG 2 FIX: Correct Queue Tint mapping (Congestion Highlights)
   const qTint = (x: number, y: number, w: number, h: number, count: number) => {
-    if(count < 2) return;
+    if (count < 2) return;
     const alpha = Math.min(0.35, count / 12);
-    ctx.fillStyle = `rgba(255,69,69,${alpha})`;
-    ctx.fillRect(x,y,w,h);
+    ctx.fillStyle = `rgba(220, 38, 38, ${alpha})`;
+    ctx.fillRect(x, y, w, h);
   };
-  // N comes from BOTTOM -> tint bottom-left lane
-  qTint(CX-ROAD, CY+ROAD, ROAD, H-CY-ROAD, q.N);
-  // S comes from TOP -> tint top-right lane
-  qTint(CX, 0, ROAD, CY-ROAD, q.S);
-  // E comes from LEFT -> tint bottom-left lane (horizontal)
-  qTint(0, CY, CX-ROAD, ROAD, q.E);
-  // W comes from RIGHT -> tint top-right lane (horizontal)
-  qTint(CX+ROAD, CY-ROAD, W-CX-ROAD, ROAD, q.W);
+  qTint(cx - halfW, cy - arm, 2 * halfW, arm - halfW, q.N);
+  qTint(cx - halfW, cy + halfW, 2 * halfW, arm - halfW, q.S);
+  qTint(cx - arm, cy - halfW, arm - halfW, 2 * halfW, q.W);
+  qTint(cx + halfW, cy - halfW, arm - halfW, 2 * halfW, q.E);
 
-  // Lane dashes
-  ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.setLineDash([10,12]);
-  ctx.beginPath(); ctx.moveTo(CX,0); ctx.lineTo(CX,CY-ROAD); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX,CY+ROAD); ctx.lineTo(CX,H); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0,CY); ctx.lineTo(CX-ROAD,CY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(CX+ROAD,CY); ctx.lineTo(W,CY); ctx.stroke();
+  ctx.strokeStyle = LINE_YELLOW;
+  ctx.lineWidth = Math.max(2, 2 * s);
+  ctx.setLineDash([]);
+  const yN1 = cy - arm;
+  const yS1 = cy + arm;
+  ctx.beginPath();
+  ctx.moveTo(cx - 1, yN1);
+  ctx.lineTo(cx - 1, cy - halfW);
+  ctx.moveTo(cx + 1, yN1);
+  ctx.lineTo(cx + 1, cy - halfW);
+  ctx.moveTo(cx - 1, cy + halfW);
+  ctx.lineTo(cx - 1, yS1);
+  ctx.moveTo(cx + 1, cy + halfW);
+  ctx.lineTo(cx + 1, yS1);
+  ctx.stroke();
+  const xW1 = cx - arm;
+  const xE1 = cx + arm;
+  ctx.beginPath();
+  ctx.moveTo(xW1, cy - 1);
+  ctx.lineTo(cx - halfW, cy - 1);
+  ctx.moveTo(xW1, cy + 1);
+  ctx.lineTo(cx - halfW, cy + 1);
+  ctx.moveTo(cx + halfW, cy - 1);
+  ctx.lineTo(xE1, cy - 1);
+  ctx.moveTo(cx + halfW, cy + 1);
+  ctx.lineTo(xE1, cy + 1);
+  ctx.stroke();
+
+  ctx.strokeStyle = LINE_WHITE;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([8, 10]);
+  const lx = cx - lane;
+  const rx = cx + lane;
+  ctx.beginPath();
+  ctx.moveTo(lx, yN1);
+  ctx.lineTo(lx, cy - halfW);
+  ctx.moveTo(rx, yN1);
+  ctx.lineTo(rx, cy - halfW);
+  ctx.moveTo(lx, cy + halfW);
+  ctx.lineTo(lx, yS1);
+  ctx.moveTo(rx, cy + halfW);
+  ctx.lineTo(rx, yS1);
+  ctx.stroke();
+  const ty = cy - lane;
+  const by = cy + lane;
+  ctx.beginPath();
+  ctx.moveTo(xW1, ty);
+  ctx.lineTo(cx - halfW, ty);
+  ctx.moveTo(xW1, by);
+  ctx.lineTo(cx - halfW, by);
+  ctx.moveTo(cx + halfW, ty);
+  ctx.lineTo(xE1, ty);
+  ctx.moveTo(cx + halfW, by);
+  ctx.lineTo(xE1, by);
+  ctx.stroke();
   ctx.setLineDash([]);
 
-  // BUG 4 FIX: Correct Stop Lines (Half-road alignment)
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(239, 68, 68, 0.95)';
+  ctx.lineWidth = Math.max(1.5, 2 * s);
   ctx.beginPath();
-  ctx.moveTo(CX-ROAD, CY+ROAD+2); ctx.lineTo(CX, CY+ROAD+2); ctx.stroke(); // N (bottom left half)
-
+  ctx.moveTo(cx - halfW, cy - stopPx);
+  ctx.lineTo(cx + halfW, cy - stopPx);
+  ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(CX, CY-ROAD-2); ctx.lineTo(CX+ROAD, CY-ROAD-2); ctx.stroke(); // S (top right half)
-
+  ctx.moveTo(cx - halfW, cy + stopPx);
+  ctx.lineTo(cx + halfW, cy + stopPx);
+  ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(CX-ROAD-2, CY); ctx.lineTo(CX-ROAD-2, CY+ROAD); ctx.stroke(); // E (left bottom half)
-
+  ctx.moveTo(cx - stopPx, cy - halfW);
+  ctx.lineTo(cx - stopPx, cy + halfW);
+  ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(CX+ROAD+2, CY-ROAD); ctx.lineTo(CX+ROAD+2, CY); ctx.stroke(); // W (right top half)
+  ctx.moveTo(cx + stopPx, cy - halfW);
+  ctx.lineTo(cx + stopPx, cy + halfW);
+  ctx.stroke();
 
-  // BUG 3 FIX: Correct Direction Labels
-  ctx.fillStyle = 'rgba(255,255,255,0.2)';
-  ctx.font = '11px IBM Plex Mono, monospace';
-  ctx.textAlign='center';
-  ctx.fillText('N', CX - LANE/2, H - 6);       // N comes from Bottom
-  ctx.fillText('S', CX + LANE/2, 16);          // S comes from Top
-  ctx.fillText('E', 16, CY + LANE/2 + 12);     // E comes from Left
-  ctx.fillText('W', W - 16, CY - LANE/2 - 2);  // W comes from Right
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = 'bold 12px IBM Plex Mono, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('N', cx, Math.max(10, cy - arm + 12 * s));
+  ctx.fillText('S', cx, Math.min(Hc - 8, cy + arm - 10 * s));
+  ctx.fillText('W', Math.max(10, cx - arm + 12 * s), cy);
+  ctx.fillText('E', Math.min(Wc - 10, cx + arm - 12 * s), cy);
 }
 
 function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
-  const CX = W / 2;
-  const CY = H / 2;
-  const ROAD = 44;
+  const Wc = ctx.canvas.width;
+  const Hc = ctx.canvas.height;
+  const s = Math.min(Wc / W, Hc / H);
+  const CX = Wc / 2;
+  const CY = Hc / 2;
+  const halfW = ROAD_HALF_PX * s;
+  const stopPx = STOP_LINE_M * SCALE * s;
+  const bulbR = Math.max(5, 6 * s);
 
   const phase = frame?.phase ?? 'NS';
   const inYellow = frame?.in_yellow ?? false;
@@ -175,9 +250,9 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | nul
   const drawLight = (offsetX: number, offsetY: number, state: string) => {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(CX + offsetX, CY + offsetY, 6, 0, Math.PI * 2);
-    const s = state.toLowerCase();
-    ctx.fillStyle = s === 'g' ? '#00FF00' : s === 'y' ? '#FFFF00' : '#FF0000';
+    ctx.arc(CX + offsetX, CY + offsetY, bulbR, 0, Math.PI * 2);
+    const st = state.toLowerCase();
+    ctx.fillStyle = st === 'g' ? '#00FF00' : st === 'y' ? '#FFFF00' : '#FF0000';
     ctx.shadowColor = ctx.fillStyle;
     ctx.shadowBlur = 10;
     ctx.fill();
@@ -185,18 +260,19 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | nul
   };
 
   if (lights) {
-    drawLight(ROAD + 10, -ROAD - 10, lights.N || 'r');
-    drawLight(-ROAD - 10, ROAD + 10, lights.S || 'r');
-    drawLight(ROAD + 10, ROAD + 10, lights.E || 'r');
-    drawLight(-ROAD - 10, -ROAD - 10, lights.W || 'r');
+    drawLight(0, -(stopPx + halfW * 0.4), lights.N || 'r');
+    drawLight(0, stopPx + halfW * 0.4, lights.S || 'r');
+    drawLight(stopPx + halfW * 0.4, 0, lights.E || 'r');
+    drawLight(-(stopPx + halfW * 0.4), 0, lights.W || 'r');
     return;
   }
 
+  const bump = halfW + 10 * s;
   const positions = [
-    { x: CX + ROAD + 8, y: CY - ROAD - 8, isNS: true },
-    { x: CX - ROAD - 8, y: CY + ROAD + 8, isNS: true },
-    { x: CX + ROAD + 8, y: CY + ROAD + 8, isNS: false },
-    { x: CX - ROAD - 8, y: CY - ROAD - 8, isNS: false },
+    { x: CX + bump, y: CY - bump, isNS: true },
+    { x: CX - bump, y: CY + bump, isNS: true },
+    { x: CX + bump, y: CY + bump, isNS: false },
+    { x: CX - bump, y: CY - bump, isNS: false },
   ];
 
   for (const { x, y, isNS } of positions) {
@@ -222,37 +298,73 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | nul
 }
 
 function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) {
-  const CX = ctx.canvas.width / 2;
-  const CY = ctx.canvas.height / 2;
+  const cw = ctx.canvas.width;
+  const ch = ctx.canvas.height;
+  const CENTER_X = cw / 2;
+  const CENTER_Y = ch / 2;
+  const s = Math.min(cw / W, ch / H);
 
   for (const v of vehicles) {
-    if (v.x === undefined || v.y === undefined) continue;
-
     ctx.save();
 
-    const screenX = CX + (v.x * SCALE);
-    const screenY = CY - (v.y * SCALE);
+    let canvasX: number;
+    let canvasY: number;
+    const hasPx =
+      typeof v.px === 'number' &&
+      typeof v.py === 'number' &&
+      Number.isFinite(v.px) &&
+      Number.isFinite(v.py);
+    if (hasPx) {
+      canvasX = CENTER_X + (v.px! - W / 2) * s;
+      canvasY = CENTER_Y + (v.py! - H / 2) * s;
+    } else {
+      const x = Number(v.x);
+      const y = Number(v.y);
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        ctx.restore();
+        continue;
+      }
+      canvasX = CENTER_X + x * SCALE * s;
+      canvasY = CENTER_Y + y * SCALE * s;
+    }
 
-    ctx.translate(screenX, screenY);
-    ctx.rotate(v.angle || 0);
+    ctx.translate(canvasX, canvasY);
+    const ang = typeof v.angle === 'number' && !Number.isNaN(v.angle) ? v.angle : 0;
+    ctx.rotate(ang);
 
-    ctx.fillStyle = v.color || 'white';
-    ctx.fillRect(-4, -8, 8, 16);
+    ctx.fillStyle = v.color || '#f5d000';
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1;
+    const bw = 8;
+    const bh = 14;
+    ctx.beginPath();
+    ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 2);
+    ctx.fill();
+    ctx.stroke();
 
     ctx.restore();
   }
 }
 
 function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
+  const canvas = ctx.canvas;
+  if (!canvas) return;
+  
+  const W = canvas.width;
+  const H = canvas.height;
+  if (W <= 0 || H <= 0) return;
+  
   const CX = W / 2;
   const CY = H / 2;
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
-  drawRoads(ctx, frame?.queues ?? {N:0, S:0, E:0, W:0});
+  try {
+    drawRoads(ctx, frame?.queues ?? {N:0, S:0, E:0, W:0});
+  } catch (e) {
+    console.error('Error in drawRoads:', e);
+  }
 
   if (!frame) {
     ctx.fillStyle = '#555';
@@ -263,21 +375,34 @@ function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
     return;
   }
 
-  drawTrafficLights(ctx, frame);
-  drawVehicles(ctx, frame.vehicles);
+  try {
+    drawTrafficLights(ctx, frame);
+  } catch (e) {
+    console.error('Error in drawTrafficLights:', e);
+  }
 
-  ctx.fillStyle = '#c8ff00';
+  try {
+    drawVehicles(ctx, frame.vehicles);
+  } catch (e) {
+    console.error('Error in drawVehicles:', e);
+  }
+
+  ctx.fillStyle = '#e8ffc4';
   ctx.font = '11px "IBM Plex Mono", monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  ctx.fillText(`Tick ${frame.tick} | ${frame.vehicles.length} vehicles | ${frame.phase}`, 8, 8);
+  const phaseHud = frame.in_yellow ? 'YELLOW' : `${frame.phase} GREEN`;
+  ctx.fillText(
+    `Tick ${frame.tick} | ${frame.vehicles.length} vehicles | ${phaseHud}`,
+    8,
+    8
+  );
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'sim' | 'judge' | 'lb'>('sim');
-  const [engineType, setEngineType] = useState<'python' | 'sumo'>('python');
   const [code, setCode] = useState(DEFAULT_CODE);
   const [isJudging, setIsJudging] = useState(false);
   const [overallScore, setOverallScore] = useState<number | null>(null);
@@ -305,9 +430,6 @@ export default function App() {
     try {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      // Ensure explicit internal resolution
-      canvas.width = W;
-      canvas.height = H;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       renderFrame(ctx, frame);
@@ -340,13 +462,6 @@ export default function App() {
     }
 
     if (!playing || framesRef.current.length === 0) return;
-
-    // Ensure canvas has explicit internal resolution
-    const canvas = canvasRef.current;
-    if (canvas) {
-      canvas.width = W;
-      canvas.height = H;
-    }
 
     lastTsRef.current = 0;
 
@@ -414,7 +529,7 @@ export default function App() {
       const res = await fetch('http://localhost:8000/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, engine_type: engineType }),
+        body: JSON.stringify({ code }),
       });
 
       if (!res.ok) {
@@ -429,8 +544,24 @@ export default function App() {
 
       if (hasNewFormat) {
         setOverallScore(data.final_score);
-        setEvalDetails(data.details ?? []);
+        const details: EvalDetail[] = data.details ?? [];
+        setEvalDetails(details);
         setResults([]);
+        const firstReplay = details.find(
+          (d) => d.replay_data && d.replay_data.length > 0
+        );
+        if (firstReplay?.replay_data) {
+          if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+          }
+          setPlaying(false);
+          tickRef.current = 0;
+          framesRef.current = firstReplay.replay_data;
+          setSelectedScenario(null);
+          setCurrentFrame(firstReplay.replay_data[0]);
+          setActiveTab('sim');
+        }
       } else {
         setOverallScore(data.overall_score);
         setResults(data.scenarios);
@@ -472,6 +603,21 @@ export default function App() {
     setCurrentFrame(frames[0]);
     setActiveTab('sim');
   }, [results]);
+
+  const selectEvalReplay = useCallback((d: EvalDetail) => {
+    const frames = d.replay_data;
+    if (!frames || frames.length === 0) return;
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    setPlaying(false);
+    tickRef.current = 0;
+    framesRef.current = frames;
+    setSelectedScenario(null);
+    setCurrentFrame(frames[0]);
+    setActiveTab('sim');
+  }, []);
 
   const togglePlay = useCallback(() => {
     if (!framesRef.current.length) return;
@@ -689,14 +835,9 @@ export default function App() {
                 <div className="h-10 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 justify-between">
                   <span className="text-[11px] font-mono text-zinc-400">controller.py</span>
                   <div className="flex items-center gap-2">
-                    <select
-                      value={engineType}
-                      onChange={(e) => setEngineType(e.target.value as 'python' | 'sumo')}
-                      className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded border border-zinc-700 text-zinc-300"
-                    >
-                      <option value="python">Python Sim</option>
-                      <option value="sumo">SUMO</option>
-                    </select>
+                    <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-wider">
+                      Engine: SUMO / TraCI
+                    </span>
                     <button
                       onClick={() => setCode(DEFAULT_CODE)}
                       className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700"
@@ -792,15 +933,31 @@ export default function App() {
                       ) : (
                         <div className="space-y-2.5">
                           {evalDetails.map((d, i) => {
-                            const name = LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
+                            const name =
+                              d.level_label ?? LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
                             const statusOk = d.status === 'OK';
                             const scoreColor = d.score >= 80 ? 'text-emerald-400' : d.score >= 60 ? 'text-amber-400' : 'text-red-400';
                             const barColor = d.score >= 80 ? 'bg-emerald-500' : d.score >= 60 ? 'bg-amber-500' : 'bg-red-500';
+                            const errText = d.error_log ?? d.error;
+                            const canReplay = Boolean(d.replay_data && d.replay_data.length > 0);
 
                             return (
                               <div
                                 key={i}
-                                className="bg-black/30 rounded-lg border border-zinc-800/60 p-3 hover:border-zinc-700 transition-all"
+                                role={canReplay ? 'button' : undefined}
+                                tabIndex={canReplay ? 0 : undefined}
+                                onClick={() => canReplay && selectEvalReplay(d)}
+                                onKeyDown={(e) => {
+                                  if (canReplay && (e.key === 'Enter' || e.key === ' ')) {
+                                    e.preventDefault();
+                                    selectEvalReplay(d);
+                                  }
+                                }}
+                                className={`bg-black/30 rounded-lg border border-zinc-800/60 p-3 transition-all ${
+                                  canReplay
+                                    ? 'hover:border-[#c8ff00]/50 cursor-pointer'
+                                    : 'hover:border-zinc-700'
+                                }`}
                               >
                                 <div className="flex items-center justify-between mb-2">
                                   <div className="flex items-center gap-2">
@@ -842,6 +999,16 @@ export default function App() {
                                     <div className="text-[10px] font-mono text-zinc-300">{d.throughput ?? '—'}</div>
                                   </div>
                                 </div>
+                                {errText && !statusOk && (
+                                  <pre className="mt-2 p-2 rounded bg-red-950/40 border border-red-900/50 text-[9px] font-mono text-red-300 whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+                                    {errText}
+                                  </pre>
+                                )}
+                                {canReplay && (
+                                  <div className="mt-2 text-[9px] font-mono text-[#c8ff00]/80">
+                                    Click to open replay in Simulation
+                                  </div>
+                                )}
                               </div>
                             );
                           })}

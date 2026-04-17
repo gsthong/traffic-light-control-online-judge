@@ -1,9 +1,12 @@
 import asyncio
 import json
 import os
+import sys
 import tempfile
+import traceback
+import uuid
 from typing import Dict, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -17,11 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Global concurrency limiter ───────────────────────────────────────────────
-
-_evaluator_semaphore = asyncio.Semaphore(10)
-
-# ── Models ────────────────────────────────────────────────────────────────────
+_evaluator_semaphore = asyncio.Semaphore(5)
 
 
 class Submission(BaseModel):
@@ -29,16 +28,12 @@ class Submission(BaseModel):
     username: str = "anonymous"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 EVALUATOR_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "evaluator.py"
 )
 
 
 async def _run_level(level: int, code: str) -> Dict[str, Any]:
-    """Spawn evaluator.py for a single level via async subprocess."""
-    
     wrapped_code = f"""import sys
 import json
 import traceback
@@ -48,14 +43,18 @@ import traceback
 # ======== CONTESTANT CODE END ========
 
 def _run_sandbox():
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
         line = line.strip()
-        if not line: continue
+        if not line:
+            continue
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-            
+        
         try:
             current_phase = data.get("phase", "NS")
             phase_timer = data.get("phase_timer", 0)
@@ -73,28 +72,24 @@ def _run_sandbox():
                 out = {{"action": "GIU_NGUYEN"}}
         except Exception as e:
             out = {{"action": "GIU_NGUYEN", "error": str(e)}}
-            
-        print(json.dumps(out))
+        
+        sys.stdout.write(json.dumps(out) + "\\n")
         sys.stdout.flush()
 
 if __name__ == "__main__":
     _run_sandbox()
 """
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".py",
-        delete=False,
-        dir=tempfile.gettempdir(),
-        encoding="utf-8",
-    ) as f:
-        f.write(wrapped_code)
-        temp_path = f.name
+    unique_id = str(uuid.uuid4())
+    temp_path = os.path.join(tempfile.gettempdir(), f"temp_solution_{unique_id}.py")
 
     try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(wrapped_code)
+
         async with _evaluator_semaphore:
             proc = await asyncio.create_subprocess_exec(
-                "python",
+                sys.executable,
                 EVALUATOR_PATH,
                 temp_path,
                 "--level",
@@ -102,42 +97,92 @@ if __name__ == "__main__":
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=1200.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {
+                    "level": level,
+                    "score": 0.0,
+                    "status": "TLE",
+                    "error": "Evaluation timeout (1200s)",
+                    "error_log": "asyncio.wait_for exceeded 1200.0s",
+                }
 
         if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace").strip()[:500]
+            raw = stderr.decode("utf-8", errors="replace").strip()
+            err = raw[:500] if len(raw) > 500 else raw
             return {
                 "level": level,
                 "score": 0.0,
                 "status": "ERROR",
-                "error": err,
+                "error": err or f"Evaluator exited with code {proc.returncode}",
+                "error_log": raw,
             }
 
         output = stdout.decode("utf-8", errors="replace").strip()
-        lines = output.splitlines()
-        last_json = None
-        for line in reversed(lines):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    last_json = json.loads(line)
-                    break
-                except json.JSONDecodeError:
-                    continue
-
-        if last_json is None:
+        if not output:
             return {
                 "level": level,
                 "score": 0.0,
                 "status": "ERROR",
-                "error": "No JSON output from evaluator",
+                "error": "No output from evaluator",
+                "error_log": "(empty stdout)",
             }
 
-        return {
-            "level": level,
-            "score": last_json.get("score", 0.0),
-            "status": last_json.get("status", "OK"),
-        }
+        try:
+            result = json.loads(output.strip().split("\n")[-1])
+        except json.JSONDecodeError as e:
+            return {
+                "level": level,
+                "score": 0.0,
+                "status": "ERROR",
+                "error": f"Invalid JSON: {str(e)}",
+                "error_log": output[:2000] if len(output) > 2000 else output,
+            }
+
+        out: Dict[str, Any] = {"level": level}
+        for key in (
+            "status",
+            "score",
+            "total_delay",
+            "max_queue_length",
+            "throughput",
+            "error",
+            "error_log",
+            "replay_data",
+            "ticks_completed",
+            "level_label",
+            "spawn_rate",
+            "bus_ratio",
+        ):
+            if key not in result:
+                continue
+            val = result[key]
+            if key == "score":
+                out[key] = float(val) if val is not None else 0.0
+            elif key in ("total_delay", "spawn_rate", "bus_ratio"):
+                out[key] = float(val) if val is not None else 0.0
+            elif key in ("max_queue_length", "throughput", "ticks_completed"):
+                out[key] = int(val) if val is not None else 0
+            else:
+                out[key] = val
+
+        if "status" not in out:
+            out["status"] = "OK"
+        if "score" not in out:
+            out["score"] = 0.0
+        if "total_delay" not in out:
+            out["total_delay"] = 0.0
+        if "max_queue_length" not in out:
+            out["max_queue_length"] = 0
+        if "throughput" not in out:
+            out["throughput"] = 0
+
+        return out
 
     except Exception as e:
         return {
@@ -145,15 +190,14 @@ if __name__ == "__main__":
             "score": 0.0,
             "status": "ERROR",
             "error": str(e),
+            "error_log": traceback.format_exc(),
         }
     finally:
         try:
-            os.unlink(temp_path)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
         except OSError:
             pass
-
-
-# ── API Endpoints ────────────────────────────────────────────────────────────
 
 
 @app.post("/evaluate")
@@ -162,8 +206,7 @@ async def evaluate_submission(submission: Submission):
         return JSONResponse(status_code=400, content={"error": "No code provided"})
     if "def control" not in submission.code:
         return JSONResponse(
-            status_code=400,
-            content={"error": "Code must define a 'control' function"},
+            status_code=400, content={"error": "Code must define a 'control' function"}
         )
 
     coros = [_run_level(level, submission.code) for level in range(1, 6)]
@@ -172,35 +215,21 @@ async def evaluate_submission(submission: Submission):
     scores = [d["score"] for d in details]
     final_score = round(sum(scores) / len(scores), 1) if scores else 0.0
 
-    return {
-        "final_score": final_score,
-        "details": list(details),
-    }
+    return {"final_score": final_score, "details": details}
 
 
 @app.get("/health")
 async def health():
     try:
-        import traci  # noqa: F401
+        import traci
 
         return {"status": "ok", "engine": "sumo"}
     except ImportError:
-        pass
-    return {
-        "status": "ok",
-        "engine": "python",
-        "message": "Using pure Python simulation",
-    }
+        return {"status": "error", "engine": "none", "error": "SUMO not installed"}
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    try:
-        import traci  # noqa: F401
-
-        engine_name = "SUMO"
-    except ImportError:
-        engine_name = "pure Python"
-    print(f"Starting backend with {engine_name} engine...")
+    print("Starting backend with SUMO TraCI engine...")
     uvicorn.run(app, host="0.0.0.0", port=8000)

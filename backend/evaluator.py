@@ -1,6 +1,6 @@
 """
 evaluator.py — Traffic Light Control Online Judge Platform (SUMO Engine)
-=========================================================================
+ =========================================================================
 Securely executes an untrusted contestant script (solution.py),
 steps through a 3600-tick simulation loop via stdin/stdout pipes,
 enforces strict hardware limits, and calculates final metrics.
@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 import os
+
+import traci
 import tempfile
 import traceback
 import math
@@ -35,8 +37,18 @@ DEFAULT_NS_DURATION = 30
 DEFAULT_EW_DURATION = 20
 YELLOW_DURATION = 3
 
+# Replay: subsample ticks to cut JSON size / serialization time (sim still runs every tick).
+REPLAY_TICK_STRIDE = 4
+# Drop vehicles outside plausible road bbox around origin (meters).
+REPLAY_CLIP_RADIUS_M = 520.0
+# Must match src/App.tsx canvas logical size + SCALE (single source for replay pixels).
+REPLAY_CANVAS_W = 520.0
+REPLAY_CANVAS_H = 520.0
+REPLAY_SCALE_PX_PER_M = 0.52
+# Node file: outer endpoints ±500 m from junction C (must match App.tsx WORLD_HALF_M).
+WORLD_HALF_M = 500.0
+
 # ── Scenario Configs ─────────────────────────────────────────────────────────
-# Maps difficulty levels 1-5 to traffic generation parameters.
 
 SCENARIO_CONFIGS = {
     1: {"spawn_rate": 0.1, "bus_ratio": 0.05, "label": "Low Traffic"},
@@ -48,109 +60,8 @@ SCENARIO_CONFIGS = {
 
 DEFAULT_LEVEL = 3
 
-# ── SUMO XML Templates ───────────────────────────────────────────────────────
-# Hardcoded 4-way intersection, 2 lanes per road. No netgenerate binary needed.
-
-NET_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
-<net version="1.16" junctionCornerDetail="5" limitTurnSpeed="5.50"
-     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-     xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/net_file.xsd">
-
-    <location netOffset="500.00,500.00"
-              convBoundary="-500.00,-500.00,500.00,500.00"
-              origBoundary="-10000000000.00,-10000000000.00,10000000000.00,10000000000.00"
-              projParameter="!"/>
-
-    <!-- Internal edges for the intersection -->
-    <edge id=":C_0" function="internal">
-        <lane id=":C_0_0" index="0" speed="16.67" length="10.00" width="4.00" shape="2.00,-5.00 2.00,5.00"/>
-    </edge>
-    <edge id=":C_1" function="internal">
-        <lane id=":C_1_0" index="0" speed="16.67" length="10.00" width="4.00" shape="5.00,0.00 -5.00,0.00"/>
-    </edge>
-    <edge id=":C_2" function="internal">
-        <lane id=":C_2_0" index="0" speed="16.67" length="10.00" width="4.00" shape="-2.00,5.00 -2.00,-5.00"/>
-    </edge>
-    <edge id=":C_3" function="internal">
-        <lane id=":C_3_0" index="0" speed="16.67" length="10.00" width="4.00" shape="-5.00,0.00 5.00,0.00"/>
-    </edge>
-
-    <!-- Approach edges (2 lanes each: right=lane 0, left=lane 1) -->
-    <edge id="N_to_C" from="N" to="C" priority="2" numLanes="2" speed="16.67">
-        <lane id="N_to_C_0" index="0" speed="16.67" length="500.00" width="4.00" shape="4.00,-500.00 4.00,0.00"/>
-        <lane id="N_to_C_1" index="1" speed="16.67" length="500.00" width="4.00" shape="0.00,-500.00 0.00,0.00"/>
-    </edge>
-    <edge id="C_to_N" from="C" to="N" priority="2" numLanes="2" speed="16.67">
-        <lane id="C_to_N_0" index="0" speed="16.67" length="500.00" width="4.00" shape="0.00,0.00 0.00,-500.00"/>
-        <lane id="C_to_N_1" index="1" speed="16.67" length="500.00" width="4.00" shape="-4.00,0.00 -4.00,-500.00"/>
-    </edge>
-    <edge id="S_to_C" from="S" to="C" priority="2" numLanes="2" speed="16.67">
-        <lane id="S_to_C_0" index="0" speed="16.67" length="500.00" width="4.00" shape="-4.00,500.00 -4.00,0.00"/>
-        <lane id="S_to_C_1" index="1" speed="16.67" length="500.00" width="4.00" shape="0.00,500.00 0.00,0.00"/>
-    </edge>
-    <edge id="C_to_S" from="C" to="S" priority="2" numLanes="2" speed="16.67">
-        <lane id="C_to_S_0" index="0" speed="16.67" length="500.00" width="4.00" shape="0.00,0.00 0.00,500.00"/>
-        <lane id="C_to_S_1" index="1" speed="16.67" length="500.00" width="4.00" shape="4.00,0.00 4.00,500.00"/>
-    </edge>
-    <edge id="E_to_C" from="E" to="C" priority="2" numLanes="2" speed="16.67">
-        <lane id="E_to_C_0" index="0" speed="16.67" length="500.00" width="4.00" shape="500.00,-4.00 0.00,-4.00"/>
-        <lane id="E_to_C_1" index="1" speed="16.67" length="500.00" width="4.00" shape="500.00,0.00 0.00,0.00"/>
-    </edge>
-    <edge id="C_to_E" from="C" to="E" priority="2" numLanes="2" speed="16.67">
-        <lane id="C_to_E_0" index="0" speed="16.67" length="500.00" width="4.00" shape="0.00,0.00 500.00,0.00"/>
-        <lane id="C_to_E_1" index="1" speed="16.67" length="500.00" width="4.00" shape="0.00,4.00 500.00,4.00"/>
-    </edge>
-    <edge id="W_to_C" from="W" to="C" priority="2" numLanes="2" speed="16.67">
-        <lane id="W_to_C_0" index="0" speed="16.67" length="500.00" width="4.00" shape="-500.00,4.00 0.00,4.00"/>
-        <lane id="W_to_C_1" index="1" speed="16.67" length="500.00" width="4.00" shape="-500.00,0.00 0.00,0.00"/>
-    </edge>
-    <edge id="C_to_W" from="C" to="W" priority="2" numLanes="2" speed="16.67">
-        <lane id="C_to_W_0" index="0" speed="16.67" length="500.00" width="4.00" shape="0.00,0.00 -500.00,0.00"/>
-        <lane id="C_to_W_1" index="1" speed="16.67" length="500.00" width="4.00" shape="0.00,-4.00 -500.00,-4.00"/>
-    </edge>
-
-    <!-- Junctions -->
-    <junction id="C" type="traffic_light" x="0.00" y="0.00"
-              incLanes="N_to_C_0 N_to_C_1 E_to_C_0 E_to_C_1 S_to_C_0 S_to_C_1 W_to_C_0 W_to_C_1"
-              intLanes=":C_0_0 :C_1_0 :C_2_0 :C_3_0"
-              shape="-5.00,0.00 5.00,0.00 5.00,0.00 5.00,0.00 5.00,0.00 5.00,0.00 5.00,0.00 -5.00,0.00 -5.00,0.00 -5.00,0.00 -5.00,0.00 -5.00,0.00 -5.00,0.00">
-        <request index="0" response="0000" foes="0000" cont="0"/>
-        <request index="1" response="0000" foes="0000" cont="0"/>
-        <request index="2" response="0000" foes="0000" cont="0"/>
-        <request index="3" response="0000" foes="0000" cont="0"/>
-    </junction>
-    <junction id="N" type="dead_end" x="0.00" y="-500.00" incLanes="C_to_N_0 C_to_N_1" intLanes="" shape="0.00,-500.00 0.00,-500.00"/>
-    <junction id="S" type="dead_end" x="0.00" y="500.00" incLanes="C_to_S_0 C_to_S_1" intLanes="" shape="0.00,500.00 0.00,500.00"/>
-    <junction id="E" type="dead_end" x="500.00" y="0.00" incLanes="C_to_E_0 C_to_E_1" intLanes="" shape="500.00,0.00 500.00,0.00"/>
-    <junction id="W" type="dead_end" x="-500.00" y="0.00" incLanes="C_to_W_0 C_to_W_1" intLanes="" shape="-500.00,0.00 -500.00,0.00"/>
-
-    <!-- Connections -->
-    <connection from="N_to_C" to="C_to_S" fromLane="0" toLane="0" tl="C" linkIndex="0" dir="s" state="o"/>
-    <connection from="E_to_C" to="C_to_W" fromLane="0" toLane="0" tl="C" linkIndex="1" dir="s" state="o"/>
-    <connection from="S_to_C" to="C_to_N" fromLane="0" toLane="0" tl="C" linkIndex="2" dir="s" state="o"/>
-    <connection from="W_to_C" to="C_to_E" fromLane="0" toLane="0" tl="C" linkIndex="3" dir="s" state="o"/>
-
-    <connection from=":C_0" to="C_to_S" fromLane="0" toLane="0" dir="s" state="M"/>
-    <connection from=":C_1" to="C_to_W" fromLane="0" toLane="0" dir="s" state="M"/>
-    <connection from=":C_2" to="C_to_N" fromLane="0" toLane="0" dir="s" state="M"/>
-    <connection from=":C_3" to="C_to_E" fromLane="0" toLane="0" dir="s" state="M"/>
-
-    <!-- TLS Logic: GGgg = NS green, ggGG = EW green, yyyy = yellow -->
-    <tlLogic id="C" type="static" programID="0" offset="0">
-        <phase duration="30" state="GGgg"/>
-        <phase duration="3"  state="yyyy"/>
-        <phase duration="20" state="ggGG"/>
-        <phase duration="3"  state="yyyy"/>
-    </tlLogic>
-</net>"""
-
 
 def generate_rou_xml(level_config: Dict[str, Any]) -> str:
-    """
-    Generate routes XML dynamically based on scenario level parameters.
-    spawn_rate controls vehicle density (vehsPerHour = spawn_rate * 5000).
-    bus_ratio controls the proportion of bus vTypes (slower, longer vehicles).
-    """
     spawn_rate = level_config["spawn_rate"]
     bus_ratio = level_config["bus_ratio"]
 
@@ -164,7 +75,7 @@ def generate_rou_xml(level_config: Dict[str, Any]) -> str:
         '        xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">',
         "",
         '    <vType id="car" length="5.0" width="2.0" maxSpeed="16.67"',
-        '           accel="2.0" decel="4.5" minGap="2.5" color="0,150,200"/>',
+        '           accel="2.0" decel="4.5" minGap="2.5" color="255,214,0"/>',
         '    <vType id="bus" length="12.0" width="2.5" maxSpeed="11.11"',
         '           accel="1.2" decel="3.0" minGap="5.0" color="200,100,0"/>',
         "",
@@ -195,31 +106,6 @@ def generate_rou_xml(level_config: Dict[str, Any]) -> str:
     return "\n".join(routes)
 
 
-ROU_XML_TEMPLATE = generate_rou_xml(SCENARIO_CONFIGS[DEFAULT_LEVEL])
-
-SUMOCFG_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
-<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
-    <input>
-        <net-file value="net.net.xml"/>
-        <route-files value="routes.rou.xml"/>
-    </input>
-    <time>
-        <begin value="0"/>
-        <end value="3600"/>
-        <step-length value="1.0"/>
-    </time>
-    <report>
-        <no-warnings value="true"/>
-        <no-step-log value="true"/>
-    </report>
-    <random_number>
-        <random value="true"/>
-        <seed value="42"/>
-    </random_number>
-</configuration>"""
-
-
 # ── SUMO Simulation Engine ───────────────────────────────────────────────────
 
 
@@ -229,7 +115,6 @@ class SumoSimulationEngine:
     Manages a 4-way intersection with 2 lanes per road.
     """
 
-    # Edge-to-direction mapping
     EDGE_TO_DIR = {
         "N_to_C": "N",
         "S_to_C": "S",
@@ -237,58 +122,46 @@ class SumoSimulationEngine:
         "W_to_C": "W",
     }
 
-    # Sensor is 150m from intersection → vehicles at distance 150 from center
     SENSOR_THRESHOLD = 150.0
 
-    def __init__(self, tmpdir: str, level_config: Dict[str, Any] = None):  # type: ignore
-        import traci
+    def __init__(self, tmpdir: str, level_config: Dict[str, Any]):
+        import uuid
         import sumolib
 
         self.tmpdir = tmpdir
-        self.traci = traci
-        self.level_config = level_config or SCENARIO_CONFIGS[DEFAULT_LEVEL]
+        self.level_config = level_config
 
-        # Write SUMO files
         self._write_files()
 
-        # Find SUMO binary
-        import shutil
+        self.label = f"sim_{uuid.uuid4().hex}"
 
-        sumo_binary = shutil.which("sumo") or shutil.which("sumo-gui")
-        if not sumo_binary:
-            raise RuntimeError(
-                "SUMO binary not found in PATH. Install sumo or set PATH."
-            )
+        try:
+            self.port = sumolib.miscutils.getFreeSocketPort()
 
-        cfg_path = os.path.join(tmpdir, "sumo.sumocfg")
-
-        # Start SUMO headless
-        traci.start(
-            [
-                sumo_binary,
+            cfg_path = os.path.join(tmpdir, "sumo.sumocfg")
+            cmd = [
+                "sumo",
                 "-c",
                 cfg_path,
                 "--no-step-log",
                 "true",
                 "--no-warnings",
                 "true",
-                "--quit-on-end",
             ]
-        )
 
-        traci.junction.subscribeContext(
-            "C",
-            traci.constants.CMD_GET_VEHICLE_VARIABLE,
-            2000.0,
-            [
-                traci.constants.VAR_POSITION,
-                traci.constants.VAR_ANGLE,
-                traci.constants.VAR_COLOR,
-            ],
-        )
+            traci.start(cmd, port=self.port, label=self.label)
+            self.traci = traci.getConnection(self.label)
+
+        except Exception as e:
+            print(f"FATAL TRACI INIT ERROR: {e}", file=sys.stderr)
+            raise
+
+        self.current_phase = "NS"
+        self.last_green_phase = "NS"
+        self.in_yellow = False
+        self.phase_timer = 0
 
     def _write_files(self):
-        """Write node/edge XML, run netconvert, write rou.xml, det.xml, sumocfg."""
         nod_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <nodes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/nodes_file.xsd">
     <node id="C" x="0.0" y="0.0" type="traffic_light"/>
@@ -373,20 +246,12 @@ class SumoSimulationEngine:
             f.write(sumocfg)
 
     def set_tls_state(self, ns_green: bool, ew_green: bool):
-        """
-        Set traffic light state via TraCI.
-        Dynamically discovers link count and builds state string.
-        """
         try:
-            # Get the current default state to know link count
             default_state = self.traci.trafficlight.getRedYellowGreenState("C")
             link_count = len(default_state)
         except self.traci.TraCIException:
             return
 
-        # Determine which links correspond to NS vs EW
-        # Netconvert orders links by incoming edge, then by connection index
-        # For a 4-way intersection: links 0..half = NS approaches, half..end = EW approaches
         half = link_count // 2
 
         if ns_green:
@@ -401,16 +266,13 @@ class SumoSimulationEngine:
         except self.traci.TraCIException:
             pass
 
-    def step(self) -> List[Dict]:
-        """
-        Advance simulation by 1 tick.
-        Uses E1 induction loops for sensor events — NO per-vehicle loops.
-        """
-        # Advance SUMO by 1 second FIRST, then read detector data
+    def step(self, collect_sensors: bool = False) -> List[Dict]:
         self.traci.simulationStep()
 
-        # Read E1 induction loop data (only 4 calls, not N vehicle calls)
         sensor_events: List[Dict] = []
+        if not collect_sensors:
+            return sensor_events
+
         detector_map = {
             "sensor_N": "N",
             "sensor_S": "S",
@@ -421,7 +283,6 @@ class SumoSimulationEngine:
             try:
                 vids = self.traci.inductionloop.getLastStepVehicleIDs(det_id)
                 for vid in vids:
-                    # Only 2 TraCI calls per detected vehicle (not per ALL vehicles)
                     speed = self.traci.vehicle.getSpeed(vid)
                     length = self.traci.vehicle.getLength(vid)
                     lane = self.traci.vehicle.getLaneID(vid)
@@ -440,7 +301,6 @@ class SumoSimulationEngine:
         return sensor_events
 
     def get_light_states(self) -> Dict[str, Any]:
-        """Get current TLS state and map to human-readable colors."""
         try:
             state = self.traci.trafficlight.getRedYellowGreenState("C")
         except self.traci.TraCIException:
@@ -456,39 +316,45 @@ class SumoSimulationEngine:
         lights["countdown"] = 0
         return lights
 
+    def _edge_last_step_waiting_time(self, edge_id: str) -> float:
+        """Per-tick waiting (seconds) on this edge; avoids inflated totals."""
+        e = self.traci.edge
+        try:
+            if hasattr(e, "getLastStepWaitingTime"):
+                return float(e.getLastStepWaitingTime(edge_id))
+        except Exception:
+            pass
+        try:
+            return float(e.getWaitingTime(edge_id))
+        except Exception:
+            return 0.0
+
     def get_metrics(self) -> Dict[str, Any]:
-        """Calculate metrics using edge-level TraCI calls — NO per-vehicle loops."""
-        # Total delay: sum waiting time per edge (4 calls)
         total_delay = 0.0
         for edge_id in ["N_to_C", "S_to_C", "E_to_C", "W_to_C"]:
-            try:
-                total_delay += self.traci.edge.getWaitingTime(edge_id)
-            except self.traci.TraCIException:
-                pass
+            total_delay += self._edge_last_step_waiting_time(edge_id)
 
-        # Max queue: sum halting vehicles per edge (4 calls)
         max_queue = 0
         for edge_id in ["N_to_C", "S_to_C", "E_to_C", "W_to_C"]:
             try:
-                max_queue += self.traci.edge.getLastStepHaltingNumber(edge_id)
-            except self.traci.TraCIException:
+                max_queue += int(self.traci.edge.getLastStepHaltingNumber(edge_id))
+            except (self.traci.TraCIException, TypeError, ValueError):
                 pass
 
-        # Throughput: arrived vehicles this step
-        throughput = self.traci.simulation.getArrivedNumber()
+        try:
+            throughput = int(self.traci.simulation.getArrivedNumber())
+        except (self.traci.TraCIException, TypeError, ValueError):
+            throughput = 0
 
         return {
-            "total_delay": round(total_delay, 2),
-            "max_queue_length": max_queue,
-            "throughput": throughput,
+            "total_delay": float(round(total_delay, 4)),
+            "max_queue_length": int(max_queue),
+            "throughput": int(throughput),
         }
 
-    def get_replay_frame(self, tick: int, phase: str, in_yellow: bool, queues: Dict[str, int]) -> Dict[str, Any]:
-        """
-        Capture a single replay frame with vehicles and light states.
-        x, y are raw world meters: (0,0) = intersection center, +Y = North, +X = East.
-        """
-        # Get light states as single-char codes
+    def get_replay_frame(
+        self, tick: int, phase: str, in_yellow: bool, queues: Dict[str, int]
+    ) -> Dict[str, Any]:
         try:
             state = self.traci.trafficlight.getRedYellowGreenState("C")
         except self.traci.TraCIException:
@@ -501,44 +367,69 @@ class SumoSimulationEngine:
         else:
             lights = {"N": "y", "S": "y", "E": "y", "W": "y"}
 
-        # Get all vehicles with positions bulk-fetched via context subscription
         vehicles: List[Dict] = []
+        cx0 = REPLAY_CANVAS_W * 0.5
+        cy0 = REPLAY_CANVAS_H * 0.5
         try:
-            results = self.traci.junction.getContextSubscriptionResults("C")
-            if results:
-                for vid, data in results.items():
-                    pos = data.get(self.traci.constants.VAR_POSITION)
-                    angle = data.get(self.traci.constants.VAR_ANGLE)
-                    color = data.get(self.traci.constants.VAR_COLOR)
-                    
-                    if pos and angle is not None:
-                        x, y = pos
-                        # Convert SUMO angle (0=North, clockwise) to math radians (0=East, CCW)
-                        angle_rad = math.pi / 2 - math.radians(angle)
-                        color_str = f"rgb({color[0]},{color[1]},{color[2]})" if color else "blue"
-                        vehicles.append(
-                            {
-                                "id": vid,
-                                "x": round(x, 4),
-                                "y": round(y, 4),
-                                "angle": round(angle_rad, 4),
-                                "color": color_str,
-                            }
-                        )
+            jp = self.traci.junction.getPosition("C")
+            jx, jy = float(jp[0]), float(jp[1])
+        except Exception:
+            jx, jy = 0.0, 0.0
+        try:
+            # getPosition() in net CRS; subtract junction C so coords match centered canvas.
+            for vid in self.traci.vehicle.getIDList():
+                try:
+                    pos = self.traci.vehicle.getPosition(vid)
+                    ang_deg = float(self.traci.vehicle.getAngle(vid))
+                except self.traci.TraCIException:
+                    continue
+                x, y = float(pos[0]), float(pos[1])
+                x -= jx
+                y -= jy
+                if math.hypot(x, y) > REPLAY_CLIP_RADIUS_M:
+                    continue
+                try:
+                    color = self.traci.vehicle.getColor(vid)
+                except Exception:
+                    color = None
+                angle_rad = float(math.pi / 2 - math.radians(ang_deg))
+                color_str = (
+                    f"rgb({int(color[0])},{int(color[1])},{int(color[2])})"
+                    if color
+                    else "rgb(255,214,0)"
+                )
+                px = cx0 + x * REPLAY_SCALE_PX_PER_M
+                py = cy0 + y * REPLAY_SCALE_PX_PER_M
+                vehicles.append(
+                    {
+                        "id": str(vid),
+                        "x": round(x, 4),
+                        "y": round(y, 4),
+                        "px": round(px, 2),
+                        "py": round(py, 2),
+                        "angle": round(angle_rad, 4),
+                        "color": color_str,
+                    }
+                )
         except self.traci.TraCIException:
             pass
 
+        q = queues or {}
         return {
-            "tick": tick,
+            "tick": int(tick),
             "lights": lights,
             "vehicles": vehicles,
             "phase": phase,
-            "in_yellow": in_yellow,
-            "queues": queues
+            "in_yellow": bool(in_yellow),
+            "queues": {
+                "N": int(q.get("N", 0)),
+                "S": int(q.get("S", 0)),
+                "E": int(q.get("E", 0)),
+                "W": int(q.get("W", 0)),
+            },
         }
 
     def close(self):
-        """Cleanly close TraCI connection."""
         try:
             self.traci.close()
         except Exception:
@@ -549,7 +440,6 @@ class SumoSimulationEngine:
 
 
 def _set_resource_limits():
-    """Pre-exec function: hard-limit RAM to 256MB, disable core dumps."""
     import resource
 
     resource.setrlimit(resource.RLIMIT_AS, (RAM_LIMIT_BYTES, RAM_LIMIT_BYTES))
@@ -557,10 +447,6 @@ def _set_resource_limits():
 
 
 def launch_sandbox(solution_path: str) -> subprocess.Popen:
-    """
-    Launch contestant's solution.py as a sandboxed subprocess.
-    NEVER uses shell=True.
-    """
     if not os.path.isfile(solution_path):
         raise FileNotFoundError(f"Solution not found: {solution_path}")
 
@@ -587,11 +473,6 @@ def launch_sandbox(solution_path: str) -> subprocess.Popen:
 
 
 def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
-    """
-    Main evaluation function with REAL SUMO physics.
-    """
-    import math  # needed by SumoSimulationEngine
-
     if level not in SCENARIO_CONFIGS:
         raise ValueError(
             f"Invalid level {level}. Must be one of {sorted(SCENARIO_CONFIGS.keys())}"
@@ -604,10 +485,8 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
     proc = None
 
     try:
-        # Create temp directory for SUMO files
         tmpdir = tempfile.mkdtemp()
 
-        # ── Initialize SUMO Engine ──────────────────────────────────────
         try:
             engine = SumoSimulationEngine(tmpdir, level_config)
         except Exception as e:
@@ -617,13 +496,11 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                 "score": 0,
             }
 
-        # ── Launch Contestant Sandbox ───────────────────────────────────
         try:
             proc = launch_sandbox(solution_path)
         except (FileNotFoundError, RuntimeError) as e:
             return {"status": "START_FAILED", "error": str(e), "score": 0}
 
-        # ── Phase tracking ──────────────────────────────────────────────
         current_phase = PHASE_NS_GREEN
         last_green_phase = PHASE_NS_GREEN
         phase_timer = 0
@@ -631,11 +508,9 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
         cumulative_delay = 0.0
         peak_queue = 0
         total_throughput = 0
-        replay_data: List[Dict[str, Any]] = []
+        replay_frames: List[Dict[str, Any]] = []
 
-        # ── 3600-Tick Loop ──────────────────────────────────────────────
         for tick in range(1, TOTAL_TICKS + 1):
-            # TLE check
             elapsed = time.time() - start_time
             if elapsed > WALL_CLOCK_LIMIT:
                 proc.kill()
@@ -644,15 +519,12 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                     "error": f"Time Limit Exceeded ({WALL_CLOCK_LIMIT}s)",
                     "ticks_completed": tick - 1,
                     "score": 0,
-                    "replay_data": replay_data,
                 }
 
-            # Set TLS based on current phase
             ns_green = current_phase == PHASE_NS_GREEN
             ew_green = current_phase == PHASE_EW_GREEN
             engine.set_tls_state(ns_green, ew_green)
 
-            # Step SUMO
             try:
                 sensor_events = engine.step()
             except Exception as e:
@@ -662,59 +534,56 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                     "error_log": f"SUMO step failed at tick {tick}: {str(e)}\n{traceback.format_exc()}",
                     "ticks_completed": tick - 1,
                     "score": 0,
-                    "replay_data": replay_data,
                 }
 
-            # Gather Queues (Halting Number)
             queues = {"N": 0, "S": 0, "E": 0, "W": 0}
-            for edge, d in zip(["N_to_C", "S_to_C", "E_to_C", "W_to_C"], ["N", "S", "E", "W"]):
+            for edge, d in zip(
+                ["N_to_C", "S_to_C", "E_to_C", "W_to_C"], ["N", "S", "E", "W"]
+            ):
                 try:
                     queues[d] = engine.traci.edge.getLastStepHaltingNumber(edge)
                 except Exception:
                     pass
-            
-            # Map state for UI and Contestant
+
             if current_phase == PHASE_NS_GREEN:
-                phase_str, in_yellow = 'NS', False
+                phase_str, in_yellow = "NS", False
             elif current_phase == PHASE_EW_GREEN:
-                phase_str, in_yellow = 'EW', False
+                phase_str, in_yellow = "EW", False
             else:
-                phase_str, in_yellow = ('NS' if last_green_phase == PHASE_NS_GREEN else 'EW'), True
+                phase_str, in_yellow = (
+                    ("NS" if last_green_phase == PHASE_NS_GREEN else "EW"),
+                    True,
+                )
 
-            # Capture replay frame (vehicles + lights at raw world coords)
-            replay_data.append(engine.get_replay_frame(tick, phase_str, in_yellow, queues))
-
-            # Send to contestant
-            light_states = engine.get_light_states()
+            # Slim IPC: wrapper only needs queues + phase + timer (saves huge JSON per tick).
             payload = {
                 "tick": tick,
-                "lights": light_states,
-                "sensor_events": sensor_events,
                 "queues": queues,
                 "phase": phase_str,
                 "phase_timer": phase_timer,
             }
 
             try:
-                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.write(
+                    json.dumps(payload, separators=(",", ":")) + "\n"
+                )
                 proc.stdin.flush()
             except (BrokenPipeError, IOError, OSError):
                 proc.kill()
                 return {
                     "status": "RTE",
-                    "error": f"Contestant crashed at tick {tick} (broken pipe)",
+                    "error": f"Contestant crashed at tick {tick}",
                     "ticks_completed": tick - 1,
                     "score": 0,
                 }
 
-            # Read contestant response
             try:
                 response_line = proc.stdout.readline()
                 if not response_line:
                     proc.kill()
                     return {
                         "status": "RTE",
-                        "error": f"Contestant exited prematurely at tick {tick}",
+                        "error": f"Contestant exited at tick {tick}",
                         "ticks_completed": tick - 1,
                         "score": 0,
                     }
@@ -723,38 +592,49 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                 proc.kill()
                 return {
                     "status": "RTE",
-                    "error": f"Invalid JSON from contestant at tick {tick}",
+                    "error": f"Invalid JSON at tick {tick}",
                     "ticks_completed": tick - 1,
                     "score": 0,
                 }
 
-            # Process contestant action
             cmd = action.get("action", "GIU_NGUYEN")
             if cmd == "CHUYEN_PHA":
                 new_duration = action.get("duration")
                 if new_duration is not None and isinstance(new_duration, (int, float)):
                     phase_duration = max(1, int(new_duration))
 
-            # Advance phase
             phase_timer += 1
             if phase_timer >= phase_duration:
                 if current_phase == PHASE_YELLOW:
-                    # Switch to opposite green
                     current_phase = (
                         PHASE_EW_GREEN
                         if last_green_phase == PHASE_NS_GREEN
                         else PHASE_NS_GREEN
                     )
                     last_green_phase = current_phase
-                    phase_duration = DEFAULT_EW_DURATION if current_phase == PHASE_EW_GREEN else DEFAULT_NS_DURATION
+                    phase_duration = (
+                        DEFAULT_EW_DURATION
+                        if current_phase == PHASE_EW_GREEN
+                        else DEFAULT_NS_DURATION
+                    )
                 else:
-                    # We are on a green phase, enter yellow
                     last_green_phase = current_phase
                     current_phase = PHASE_YELLOW
                     phase_duration = YELLOW_DURATION
                 phase_timer = 0
 
-            # Accumulate metrics
+            if current_phase == PHASE_NS_GREEN:
+                rphase, ryellow = "NS", False
+            elif current_phase == PHASE_EW_GREEN:
+                rphase, ryellow = "EW", False
+            else:
+                rphase = "NS" if last_green_phase == PHASE_NS_GREEN else "EW"
+                ryellow = True
+            if tick % REPLAY_TICK_STRIDE == 0 or tick == TOTAL_TICKS:
+                replay_frames.append(
+                    engine.get_replay_frame(tick, rphase, ryellow, queues)
+                )
+
             metrics = engine.get_metrics()
             cumulative_delay += metrics["total_delay"]
             peak_queue = max(peak_queue, metrics["max_queue_length"])
@@ -768,7 +648,6 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
         }
 
     finally:
-        # Cleanup
         if engine:
             engine.close()
         if proc:
@@ -785,7 +664,6 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
             except Exception:
                 proc.kill()
 
-    # ── Final Scoring ───────────────────────────────────────────────────
     avg_delay = cumulative_delay / TOTAL_TICKS if TOTAL_TICKS > 0 else 0
     score = max(0.0, min(100.0, 100.0 - (avg_delay / 10.0)))
 
@@ -796,11 +674,11 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
         "bus_ratio": level_config["bus_ratio"],
         "status": "OK",
         "ticks_completed": TOTAL_TICKS,
-        "total_delay": round(cumulative_delay, 2),
-        "max_queue_length": peak_queue,
-        "throughput": total_throughput,
-        "score": round(score, 2),
-        "replay_data": replay_data,
+        "total_delay": float(round(cumulative_delay, 2)),
+        "max_queue_length": int(peak_queue),
+        "throughput": int(total_throughput),
+        "score": float(round(score, 2)),
+        "replay_data": replay_frames,
     }
 
 
@@ -814,35 +692,16 @@ if __name__ == "__main__":
         "solution",
         nargs="?",
         default="solution.py",
-        help="Path to contestant's solution script (default: solution.py)",
+        help="Path to contestant's solution script",
     )
     parser.add_argument(
         "--level",
         type=int,
         default=DEFAULT_LEVEL,
         choices=sorted(SCENARIO_CONFIGS.keys()),
-        help=f"Difficulty level 1-5 (default: {DEFAULT_LEVEL}). "
-        f"1={SCENARIO_CONFIGS[1]['label']}, "
-        f"3={SCENARIO_CONFIGS[3]['label']}, "
-        f"5={SCENARIO_CONFIGS[5]['label']}",
+        help="Difficulty level 1-5",
     )
     args = parser.parse_args()
 
-    solution_path = args.solution
-    level = args.level
-    level_config = SCENARIO_CONFIGS[level]
-
-    print(f"[*] Evaluating: {solution_path}")
-    print(f"[*] Engine: SUMO (TraCI)")
-    print(f"[*] Level: {level} ({level_config['label']})")
-    print(f"[*] Spawn rate: {level_config['spawn_rate']}")
-    print(f"[*] Bus ratio: {level_config['bus_ratio']}")
-    print(f"[*] Ticks: {TOTAL_TICKS}")
-    print(f"[*] Wall-clock limit: {WALL_CLOCK_LIMIT}s")
-    print(f"[*] RAM limit: {RAM_LIMIT_MB}MB")
-    print("=" * 60)
-
-    result = evaluate(solution_path, level=level)
-
-    print("=" * 60)
-    print(json.dumps(result, indent=2))
+    result = evaluate(args.solution, level=args.level)
+    print(json.dumps(result, separators=(",", ":")))
