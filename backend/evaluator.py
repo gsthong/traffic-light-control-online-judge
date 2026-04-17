@@ -276,6 +276,17 @@ class SumoSimulationEngine:
             ]
         )
 
+        traci.junction.subscribeContext(
+            "C",
+            traci.constants.CMD_GET_VEHICLE_VARIABLE,
+            2000.0,
+            [
+                traci.constants.VAR_POSITION,
+                traci.constants.VAR_ANGLE,
+                traci.constants.VAR_COLOR,
+            ],
+        )
+
     def _write_files(self):
         """Write node/edge XML, run netconvert, write rou.xml, det.xml, sumocfg."""
         nod_xml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -490,30 +501,32 @@ class SumoSimulationEngine:
         else:
             lights = {"N": "y", "S": "y", "E": "y", "W": "y"}
 
-        # Get all vehicles with positions
+        # Get all vehicles with positions bulk-fetched via context subscription
         vehicles: List[Dict] = []
-        for vid in self.traci.vehicle.getIDList():
-            try:
-                x, y = self.traci.vehicle.getPosition(vid)
-                angle = self.traci.vehicle.getAngle(vid)
-                # Convert SUMO angle (0=North, clockwise) to math radians (0=East, CCW)
-                angle_rad = math.pi / 2 - math.radians(angle)
-                # Get vehicle color from type
-                color = self.traci.vehicle.getColor(vid)
-                color_str = (
-                    f"rgb({color[0]},{color[1]},{color[2]})" if color else "blue"
-                )
-                vehicles.append(
-                    {
-                        "id": vid,
-                        "x": round(x, 4),
-                        "y": round(y, 4),
-                        "angle": round(angle_rad, 4),
-                        "color": color_str,
-                    }
-                )
-            except self.traci.TraCIException:
-                continue
+        try:
+            results = self.traci.junction.getContextSubscriptionResults("C")
+            if results:
+                for vid, data in results.items():
+                    pos = data.get(self.traci.constants.VAR_POSITION)
+                    angle = data.get(self.traci.constants.VAR_ANGLE)
+                    color = data.get(self.traci.constants.VAR_COLOR)
+                    
+                    if pos and angle is not None:
+                        x, y = pos
+                        # Convert SUMO angle (0=North, clockwise) to math radians (0=East, CCW)
+                        angle_rad = math.pi / 2 - math.radians(angle)
+                        color_str = f"rgb({color[0]},{color[1]},{color[2]})" if color else "blue"
+                        vehicles.append(
+                            {
+                                "id": vid,
+                                "x": round(x, 4),
+                                "y": round(y, 4),
+                                "angle": round(angle_rad, 4),
+                                "color": color_str,
+                            }
+                        )
+        except self.traci.TraCIException:
+            pass
 
         return {
             "tick": tick,
