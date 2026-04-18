@@ -1,14 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Play, Pause, RotateCcw, ChevronRight, Activity, Zap, Trophy, Users, Loader2 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface VehicleReplay {
   id: string;
   x: number;
   y: number;
-  /** Precomputed canvas pixels from backend (preferred). */
   px?: number;
   py?: number;
   road: string;
@@ -66,28 +64,26 @@ const LEVEL_NAMES: Record<number, string> = {
   5: 'Rush Hour',
 };
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const W = 520;
 const H = 520;
-/** SUMO net: ±WORLD_HALF_M m from junction C along each arm (must match evaluator). */
 const WORLD_HALF_M = 500;
-/** Pixels per metre — same as backend REPLAY_SCALE_PX_PER_M. */
 const SCALE = 0.52;
-/** Road arm length from center in pixels (500 m × scale). */
 const ARM_PX = WORLD_HALF_M * SCALE;
-/** Schematic half-width of paved surface at 520px canvas (lanes visible, not 1:1 m). */
 const ROAD_HALF_PX = 22;
 const STOP_LINE_M = 28;
 
-const ROAD_COLORS: Record<string, string> = {
-  road_N: '#5c7a9a',
-  road_S: '#7a5c9a',
-  road_E: '#9a7a5c',
-  road_W: '#5c9a7a',
-};
-
 const DEFAULT_CODE = `# Traffic Light Controller
+# ─────────────────────────────────────────────────────────
+# Arguments:
+#   queues       : dict  — {N, S, E, W}  vehicle counts waiting
+#   current_phase: str   — 'NS' or 'EW'
+#   phase_timer  : float — seconds elapsed in current phase
+#
+# Return: 'NS', 'EW', or 'yellow'
+# ─────────────────────────────────────────────────────────
+
 def control(queues, current_phase, phase_timer):
     if current_phase == 'NS':
         if phase_timer >= 30:
@@ -98,187 +94,96 @@ def control(queues, current_phase, phase_timer):
     return current_phase`;
 
 const MOCK_LEADERBOARD: LeaderEntry[] = [
-  { rank: 1, username: 'traffic_wizard', score: 97.3, date: '2026-03-28' },
-  { rank: 2, username: 'signal_master', score: 94.1, date: '2026-03-30' },
-  { rank: 3, username: 'green_wave_dev', score: 91.8, date: '2026-04-01' },
-  { rank: 4, username: 'flow_optimizer', score: 89.5, date: '2026-03-25' },
-  { rank: 5, username: 'adaptive_ctrl', score: 87.2, date: '2026-04-02' },
-  { rank: 6, username: 'queue_buster', score: 84.0, date: '2026-03-29' },
-  { rank: 7, username: 'phase_hacker', score: 81.6, date: '2026-03-31' },
-  { rank: 8, username: 'intersection_ai', score: 78.9, date: '2026-03-27' },
-  { rank: 9, username: 'throughput_king', score: 75.4, date: '2026-04-01' },
-  { rank: 10, username: 'fixed_timer_bot', score: 72.1, date: '2026-03-26' },
+  { rank: 1, username: 'adaptive_v3.py',      score: 94.2, date: '2026-03-28' },
+  { rank: 2, username: 'demand_queue_opt.py', score: 88.7, date: '2026-03-30' },
+  { rank: 3, username: 'greedy_ns.py',        score: 81.0, date: '2026-04-01' },
+  { rank: 4, username: 'baseline_30_20.py',   score: 67.3, date: '2026-03-25' },
 ];
 
-// ── Canvas Drawing ───────────────────────────────────────────────────────────
+// ── Canvas Drawing ────────────────────────────────────────────────────────────
 
-function drawRoads(ctx: CanvasRenderingContext2D, q: {N:number;S:number;E:number;W:number} = {N:0,S:0,E:0,W:0}) {
+function drawRoads(ctx: CanvasRenderingContext2D, q: { N: number; S: number; E: number; W: number } = { N: 0, S: 0, E: 0, W: 0 }) {
   const Wc = ctx.canvas.width;
   const Hc = ctx.canvas.height;
-  const s = Math.min(Wc / W, Hc / H);
   const cx = Wc / 2;
   const cy = Hc / 2;
-  const arm = ARM_PX * s;
-  const halfW = ROAD_HALF_PX * s;
-  const lane = 7 * s;
-  const stopPx = STOP_LINE_M * SCALE * s;
-  const LINE_WHITE = 'rgba(255,255,255,0.85)';
-  const LINE_YELLOW = 'rgba(234, 179, 8, 0.95)';
+  const arm = ARM_PX;
+  const halfW = ROAD_HALF_PX;
+  const lane = 10;
 
-  ctx.fillStyle = '#000000';
+  // Background
+  ctx.fillStyle = '#1a1f1a';
   ctx.fillRect(0, 0, Wc, Hc);
 
-  // Pavement: same geographic span as SUMO (±WORLD_HALF_M m → ±ARM_PX px).
-  ctx.fillStyle = '#1a1f1a';
-  ctx.fillRect(cx - halfW, cy - arm, 2 * halfW, 2 * arm);
-  ctx.fillRect(cx - arm, cy - halfW, 2 * arm, 2 * halfW);
+  // Road surfaces
   ctx.fillStyle = '#2a2a2a';
-  ctx.fillRect(cx - halfW, cy - arm, 2 * halfW, 2 * arm);
-  ctx.fillRect(cx - arm, cy - halfW, 2 * arm, 2 * halfW);
+  ctx.fillRect(cx - halfW, 0,      2 * halfW, Hc);
+  ctx.fillRect(0,           cy - halfW, Wc, 2 * halfW);
 
+  // Queue tint overlays
   const qTint = (x: number, y: number, w: number, h: number, count: number) => {
     if (count < 2) return;
     const alpha = Math.min(0.35, count / 12);
-    ctx.fillStyle = `rgba(220, 38, 38, ${alpha})`;
+    ctx.fillStyle = `rgba(255,69,69,${alpha})`;
     ctx.fillRect(x, y, w, h);
   };
-  qTint(cx - halfW, cy - arm, 2 * halfW, arm - halfW, q.N);
-  qTint(cx - halfW, cy + halfW, 2 * halfW, arm - halfW, q.S);
-  qTint(cx - arm, cy - halfW, arm - halfW, 2 * halfW, q.W);
-  qTint(cx + halfW, cy - halfW, arm - halfW, 2 * halfW, q.E);
+  qTint(cx - halfW, 0,          2 * halfW, cy - halfW, q.N);
+  qTint(cx - halfW, cy + halfW, 2 * halfW, Hc - cy - halfW, q.S);
+  qTint(0,          cy - halfW, cx - halfW, 2 * halfW, q.W);
+  qTint(cx + halfW, cy - halfW, Wc - cx - halfW, 2 * halfW, q.E);
 
-  ctx.strokeStyle = LINE_YELLOW;
-  ctx.lineWidth = Math.max(2, 2 * s);
-  ctx.setLineDash([]);
-  const yN1 = cy - arm;
-  const yS1 = cy + arm;
-  ctx.beginPath();
-  ctx.moveTo(cx - 1, yN1);
-  ctx.lineTo(cx - 1, cy - halfW);
-  ctx.moveTo(cx + 1, yN1);
-  ctx.lineTo(cx + 1, cy - halfW);
-  ctx.moveTo(cx - 1, cy + halfW);
-  ctx.lineTo(cx - 1, yS1);
-  ctx.moveTo(cx + 1, cy + halfW);
-  ctx.lineTo(cx + 1, yS1);
-  ctx.stroke();
-  const xW1 = cx - arm;
-  const xE1 = cx + arm;
-  ctx.beginPath();
-  ctx.moveTo(xW1, cy - 1);
-  ctx.lineTo(cx - halfW, cy - 1);
-  ctx.moveTo(xW1, cy + 1);
-  ctx.lineTo(cx - halfW, cy + 1);
-  ctx.moveTo(cx + halfW, cy - 1);
-  ctx.lineTo(xE1, cy - 1);
-  ctx.moveTo(cx + halfW, cy + 1);
-  ctx.lineTo(xE1, cy + 1);
-  ctx.stroke();
-
-  ctx.strokeStyle = LINE_WHITE;
+  // Centre-line dashes
+  ctx.strokeStyle = '#444';
   ctx.lineWidth = 1;
-  ctx.setLineDash([8, 10]);
-  const lx = cx - lane;
-  const rx = cx + lane;
-  ctx.beginPath();
-  ctx.moveTo(lx, yN1);
-  ctx.lineTo(lx, cy - halfW);
-  ctx.moveTo(rx, yN1);
-  ctx.lineTo(rx, cy - halfW);
-  ctx.moveTo(lx, cy + halfW);
-  ctx.lineTo(lx, yS1);
-  ctx.moveTo(rx, cy + halfW);
-  ctx.lineTo(rx, yS1);
-  ctx.stroke();
-  const ty = cy - lane;
-  const by = cy + lane;
-  ctx.beginPath();
-  ctx.moveTo(xW1, ty);
-  ctx.lineTo(cx - halfW, ty);
-  ctx.moveTo(xW1, by);
-  ctx.lineTo(cx - halfW, by);
-  ctx.moveTo(cx + halfW, ty);
-  ctx.lineTo(xE1, ty);
-  ctx.moveTo(cx + halfW, by);
-  ctx.lineTo(xE1, by);
-  ctx.stroke();
+  ctx.setLineDash([10, 12]);
+  // N arm
+  ctx.beginPath(); ctx.moveTo(cx, 0);      ctx.lineTo(cx, cy - halfW); ctx.stroke();
+  // S arm
+  ctx.beginPath(); ctx.moveTo(cx, cy + halfW); ctx.lineTo(cx, Hc);    ctx.stroke();
+  // W arm
+  ctx.beginPath(); ctx.moveTo(0, cy);      ctx.lineTo(cx - halfW, cy); ctx.stroke();
+  // E arm
+  ctx.beginPath(); ctx.moveTo(cx + halfW, cy); ctx.lineTo(Wc, cy);    ctx.stroke();
   ctx.setLineDash([]);
 
-  ctx.strokeStyle = 'rgba(239, 68, 68, 0.95)';
-  ctx.lineWidth = Math.max(1.5, 2 * s);
-  ctx.beginPath();
-  ctx.moveTo(cx - halfW, cy - stopPx);
-  ctx.lineTo(cx + halfW, cy - stopPx);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx - halfW, cy + stopPx);
-  ctx.lineTo(cx + halfW, cy + stopPx);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx - stopPx, cy - halfW);
-  ctx.lineTo(cx - stopPx, cy + halfW);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx + stopPx, cy - halfW);
-  ctx.lineTo(cx + stopPx, cy + halfW);
-  ctx.stroke();
+  // Stop lines
+  const stopPx = STOP_LINE_M * SCALE;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx - halfW, cy - stopPx); ctx.lineTo(cx + halfW, cy - stopPx); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - halfW, cy + stopPx); ctx.lineTo(cx + halfW, cy + stopPx); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - stopPx, cy - halfW); ctx.lineTo(cx - stopPx, cy + halfW); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + stopPx, cy - halfW); ctx.lineTo(cx + stopPx, cy + halfW); ctx.stroke();
 
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.font = 'bold 12px IBM Plex Mono, monospace';
+  // Direction labels
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.font = '11px IBM Plex Mono, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('N', cx, Math.max(10, cy - arm + 12 * s));
-  ctx.fillText('S', cx, Math.min(Hc - 8, cy + arm - 10 * s));
-  ctx.fillText('W', Math.max(10, cx - arm + 12 * s), cy);
-  ctx.fillText('E', Math.min(Wc - 10, cx + arm - 12 * s), cy);
+  ctx.fillText('N', cx + lane / 2, 16);
+  ctx.fillText('S', cx - lane / 2, Hc - 8);
+  ctx.fillText('W', 16,            cy - lane / 2);
+  ctx.fillText('E', Wc - 16,      cy + lane / 2);
 }
 
-function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
-  const Wc = ctx.canvas.width;
-  const Hc = ctx.canvas.height;
-  const s = Math.min(Wc / W, Hc / H);
-  const CX = Wc / 2;
-  const CY = Hc / 2;
-  const halfW = ROAD_HALF_PX * s;
-  const stopPx = STOP_LINE_M * SCALE * s;
-  const bulbR = Math.max(5, 6 * s);
-
-  const phase = frame?.phase ?? 'NS';
+function drawSignalBoxes(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
+  const cx = ctx.canvas.width / 2;
+  const cy = ctx.canvas.height / 2;
+  const halfW = ROAD_HALF_PX;
+  const phase    = frame?.phase ?? 'NS';
   const inYellow = frame?.in_yellow ?? false;
-  const lights = frame?.lights;
 
-  const drawLight = (offsetX: number, offsetY: number, state: string) => {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(CX + offsetX, CY + offsetY, bulbR, 0, Math.PI * 2);
-    const st = state.toLowerCase();
-    ctx.fillStyle = st === 'g' ? '#00FF00' : st === 'y' ? '#FFFF00' : '#FF0000';
-    ctx.shadowColor = ctx.fillStyle;
-    ctx.shadowBlur = 10;
-    ctx.fill();
-    ctx.restore();
-  };
-
-  if (lights) {
-    drawLight(0, -(stopPx + halfW * 0.4), lights.N || 'r');
-    drawLight(0, stopPx + halfW * 0.4, lights.S || 'r');
-    drawLight(stopPx + halfW * 0.4, 0, lights.E || 'r');
-    drawLight(-(stopPx + halfW * 0.4), 0, lights.W || 'r');
-    return;
-  }
-
-  const bump = halfW + 10 * s;
-  const positions = [
-    { x: CX + bump, y: CY - bump, isNS: true },
-    { x: CX - bump, y: CY + bump, isNS: true },
-    { x: CX + bump, y: CY + bump, isNS: false },
-    { x: CX - bump, y: CY - bump, isNS: false },
+  const corners = [
+    { x: cx + halfW + 8, y: cy + halfW + 8, isNS: true  },  // SE corner
+    { x: cx - halfW - 8, y: cy - halfW - 8, isNS: true  },  // NW corner
+    { x: cx + halfW + 8, y: cy - halfW - 8, isNS: false },  // NE corner
+    { x: cx - halfW - 8, y: cy + halfW + 8, isNS: false },  // SW corner
   ];
 
-  for (const { x, y, isNS } of positions) {
-    const green = isNS ? (phase === 'NS' && !inYellow) : (phase === 'EW' && !inYellow);
+  for (const { x, y, isNS } of corners) {
+    const green  = isNS ? (phase === 'NS' && !inYellow) : (phase === 'EW' && !inYellow);
     const yellow = inYellow;
-    const red = !green && !yellow;
+    const red    = !green && !yellow;
     const s = 5;
 
     ctx.fillStyle = '#111';
@@ -286,13 +191,13 @@ function drawTrafficLights(ctx: CanvasRenderingContext2D, frame: TickFrame | nul
     ctx.roundRect(x - s, y - s * 4, s * 2, s * 9, 2);
     ctx.fill();
 
-    ctx.fillStyle = red || yellow ? '#ff4545' : '#ff454530';
+    ctx.fillStyle = (red || yellow) ? '#ff4545' : 'rgba(255,69,69,0.15)';
     ctx.beginPath(); ctx.arc(x, y - s * 2.5, s * 0.7, 0, Math.PI * 2); ctx.fill();
 
-    ctx.fillStyle = yellow ? '#ffaa00' : '#ffaa0025';
+    ctx.fillStyle = yellow ? '#ffaa00' : 'rgba(255,170,0,0.15)';
     ctx.beginPath(); ctx.arc(x, y, s * 0.7, 0, Math.PI * 2); ctx.fill();
 
-    ctx.fillStyle = green ? '#3ddc84' : '#3ddc8425';
+    ctx.fillStyle = green ? '#3ddc84' : 'rgba(61,220,132,0.15)';
     ctx.beginPath(); ctx.arc(x, y + s * 2.5, s * 0.7, 0, Math.PI * 2); ctx.fill();
   }
 }
@@ -302,7 +207,6 @@ function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) 
   const ch = ctx.canvas.height;
   const CENTER_X = cw / 2;
   const CENTER_Y = ch / 2;
-  const s = Math.min(cw / W, ch / H);
 
   for (const v of vehicles) {
     ctx.save();
@@ -314,33 +218,34 @@ function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) 
       typeof v.py === 'number' &&
       Number.isFinite(v.px) &&
       Number.isFinite(v.py);
+
     if (hasPx) {
-      canvasX = CENTER_X + (v.px! - W / 2) * s;
-      canvasY = CENTER_Y + (v.py! - H / 2) * s;
+      canvasX = v.px!;
+      canvasY = v.py!;
     } else {
       const x = Number(v.x);
       const y = Number(v.y);
-      if (Number.isNaN(x) || Number.isNaN(y)) {
-        ctx.restore();
-        continue;
-      }
-      canvasX = CENTER_X + x * SCALE * s;
-      canvasY = CENTER_Y + y * SCALE * s;
+      if (Number.isNaN(x) || Number.isNaN(y)) { ctx.restore(); continue; }
+      canvasX = CENTER_X + x * SCALE;
+      canvasY = CENTER_Y + y * SCALE;
     }
 
     ctx.translate(canvasX, canvasY);
     const ang = typeof v.angle === 'number' && !Number.isNaN(v.angle) ? v.angle : 0;
     ctx.rotate(ang);
 
+    const bw = 8, bh = 14;
     ctx.fillStyle = v.color || '#f5d000';
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
     ctx.lineWidth = 1;
-    const bw = 8;
-    const bh = 14;
     ctx.beginPath();
     ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 2);
     ctx.fill();
     ctx.stroke();
+
+    // Windshield
+    ctx.fillStyle = 'rgba(200,230,255,0.5)';
+    ctx.fillRect(-bw / 2 + 1, -bh / 2 + 2, bw - 2, 3);
 
     ctx.restore();
   }
@@ -349,126 +254,143 @@ function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) 
 function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
   const canvas = ctx.canvas;
   if (!canvas) return;
-  
-  const W = canvas.width;
-  const H = canvas.height;
-  if (W <= 0 || H <= 0) return;
-  
-  const CX = W / 2;
-  const CY = H / 2;
+  const cw = canvas.width, ch = canvas.height;
+  if (cw <= 0 || ch <= 0) return;
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, W, H);
+  ctx.clearRect(0, 0, cw, ch);
 
-  try {
-    drawRoads(ctx, frame?.queues ?? {N:0, S:0, E:0, W:0});
-  } catch (e) {
-    console.error('Error in drawRoads:', e);
-  }
+  drawRoads(ctx, frame?.queues ?? { N: 0, S: 0, E: 0, W: 0 });
 
   if (!frame) {
     ctx.fillStyle = '#555';
-    ctx.font = '14px "IBM Plex Mono", monospace';
+    ctx.font = '13px IBM Plex Mono, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('Submit code and click a scenario to replay', CX, CY);
+    ctx.fillText('Submit code and run judge to see replay', cw / 2, ch / 2);
     return;
   }
 
-  try {
-    drawTrafficLights(ctx, frame);
-  } catch (e) {
-    console.error('Error in drawTrafficLights:', e);
-  }
+  drawSignalBoxes(ctx, frame);
+  drawVehicles(ctx, frame.vehicles);
 
-  try {
-    drawVehicles(ctx, frame.vehicles);
-  } catch (e) {
-    console.error('Error in drawVehicles:', e);
-  }
-
-  ctx.fillStyle = '#e8ffc4';
-  ctx.font = '11px "IBM Plex Mono", monospace';
+  // HUD overlay
+  ctx.fillStyle = 'rgba(200,255,0,0.85)';
+  ctx.font = '10px IBM Plex Mono, monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  const phaseHud = frame.in_yellow ? 'YELLOW' : `${frame.phase} GREEN`;
-  ctx.fillText(
-    `Tick ${frame.tick} | ${frame.vehicles.length} vehicles | ${phaseHud}`,
-    8,
-    8
-  );
+  const phaseStr = frame.in_yellow ? 'YELLOW' : `${frame.phase} GREEN`;
+  ctx.fillText(`Tick ${frame.tick} | ${frame.vehicles.length} veh | ${phaseStr}`, 10, 10);
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
+// ── Default Code Examples ─────────────────────────────────────────────────────
+
+const EXAMPLES: Record<string, string> = {
+  fixed: `# Fixed-time controller (baseline)
+def control(queues, current_phase, phase_timer):
+    if current_phase == 'NS':
+        if phase_timer >= 30:
+            return 'yellow'
+    elif current_phase == 'EW':
+        if phase_timer >= 20:
+            return 'yellow'
+    return current_phase`,
+
+  adaptive: `# Adaptive controller
+def control(queues, current_phase, phase_timer):
+    ns_total = queues['N'] + queues['S']
+    ew_total = queues['E'] + queues['W']
+
+    if current_phase == 'NS':
+        green_time = 25 + min(15, ns_total * 2)
+        if ew_total > 8 and phase_timer > 20:
+            return 'yellow'
+        if phase_timer >= green_time:
+            return 'yellow'
+    else:
+        green_time = 18 + min(15, ew_total * 2)
+        if ns_total > 8 and phase_timer > 15:
+            return 'yellow'
+        if phase_timer >= green_time:
+            return 'yellow'
+    return current_phase`,
+
+  demand: `# Demand-based controller
+def control(queues, current_phase, phase_timer):
+    ns = queues['N'] + queues['S']
+    ew = queues['E'] + queues['W']
+
+    if phase_timer < 12:
+        return current_phase
+
+    if current_phase == 'NS':
+        if ew > ns * 1.8 and phase_timer > 15:
+            return 'yellow'
+        if phase_timer >= 35:
+            return 'yellow'
+    else:
+        if ns > ew * 1.8 and phase_timer > 12:
+            return 'yellow'
+        if phase_timer >= 28:
+            return 'yellow'
+    return current_phase`,
+};
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'sim' | 'judge' | 'lb'>('sim');
-  const [code, setCode] = useState(DEFAULT_CODE);
+  const [code, setCode]           = useState(DEFAULT_CODE);
   const [isJudging, setIsJudging] = useState(false);
   const [overallScore, setOverallScore] = useState<number | null>(null);
-  const [results, setResults] = useState<ScenarioResult[]>([]);
+  const [results, setResults]       = useState<ScenarioResult[]>([]);
   const [evalDetails, setEvalDetails] = useState<EvalDetail[]>([]);
   const [selectedScenario, setSelectedScenario] = useState<number | null>(null);
 
-  const [playing, setPlaying] = useState(false);
+  const [playing, setPlaying]         = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(5);
   const [currentFrame, setCurrentFrame] = useState<TickFrame | null>(null);
 
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rafRef = useRef<number | null>(null);
-  const framesRef = useRef<TickFrame[]>([]);
-  const tickRef = useRef(0);
-  const lastTsRef = useRef(0);
-  const playingRef = useRef(false);
-  const speedRef = useRef(5);
+  const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const rafRef      = useRef<number | null>(null);
+  const framesRef   = useRef<TickFrame[]>([]);
+  const tickRef     = useRef(0);
+  const lastTsRef   = useRef(0);
+  const playingRef  = useRef(false);
+  const speedRef    = useRef(5);
 
   useEffect(() => { playingRef.current = playing; }, [playing]);
   useEffect(() => { speedRef.current = playbackSpeed; }, [playbackSpeed]);
 
-  // Draw directly - no state dependency
   const draw = useCallback((frame: TickFrame | null) => {
-    try {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      renderFrame(ctx, frame);
-    } catch (err) {
-      console.error('Canvas draw error:', err);
-    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    renderFrame(ctx, frame);
   }, []);
 
-  // Ensure canvas is set up on mount
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.width = W;
+    canvas.width  = W;
     canvas.height = H;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     renderFrame(ctx, null);
   }, []);
 
-  // Draw whenever currentFrame changes
-  useEffect(() => {
-    draw(currentFrame);
-  }, [currentFrame, draw]);
+  useEffect(() => { draw(currentFrame); }, [currentFrame, draw]);
 
-  // Playback loop - draws directly inside rAF
+  // Playback loop
   useEffect(() => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     if (!playing || framesRef.current.length === 0) return;
 
     lastTsRef.current = 0;
-
     const loop = (ts: number) => {
       try {
         if (!playingRef.current) return;
-
         if (!lastTsRef.current) lastTsRef.current = ts;
         const dt = Math.min((ts - lastTsRef.current) / 1000, 0.1);
         lastTsRef.current = ts;
@@ -477,38 +399,25 @@ export default function App() {
         if (frames.length === 0) return;
 
         tickRef.current += dt * speedRef.current;
-
         if (tickRef.current >= frames.length - 1) {
           tickRef.current = frames.length - 1;
           const last = frames[frames.length - 1];
-          setCurrentFrame(last);
-          draw(last);
-          setPlaying(false);
-          return;
+          setCurrentFrame(last); draw(last); setPlaying(false); return;
         }
 
         const frame = frames[Math.floor(tickRef.current)];
-        setCurrentFrame(frame);
-        draw(frame);
-
+        setCurrentFrame(frame); draw(frame);
         rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
-        console.error('Playback loop error:', err);
+        console.error('Playback error:', err);
         setPlaying(false);
       }
     };
-
     rafRef.current = requestAnimationFrame(loop);
-
-    return () => {
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-    };
+    return () => { if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; } };
   }, [playing, draw]);
 
-  // ── Judge ────────────────────────────────────────────────────────────────
+  // ── Judge ─────────────────────────────────────────────────────────────────
 
   const runJudge = async () => {
     setIsJudging(true);
@@ -520,10 +429,7 @@ export default function App() {
     setPlaying(false);
     framesRef.current = [];
     tickRef.current = 0;
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
 
     try {
       const res = await fetch('http://localhost:8000/evaluate', {
@@ -531,30 +437,22 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Server error' }));
         throw new Error(err.error || err.detail || `Server error ${res.status}`);
       }
-
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
       const hasNewFormat = 'final_score' in data && 'details' in data;
-
       if (hasNewFormat) {
         setOverallScore(data.final_score);
         const details: EvalDetail[] = data.details ?? [];
         setEvalDetails(details);
         setResults([]);
-        const firstReplay = details.find(
-          (d) => d.replay_data && d.replay_data.length > 0
-        );
+        const firstReplay = details.find((d) => d.replay_data && d.replay_data.length > 0);
         if (firstReplay?.replay_data) {
-          if (rafRef.current) {
-            cancelAnimationFrame(rafRef.current);
-            rafRef.current = null;
-          }
+          if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
           setPlaying(false);
           tickRef.current = 0;
           framesRef.current = firstReplay.replay_data;
@@ -566,10 +464,7 @@ export default function App() {
         setOverallScore(data.overall_score);
         setResults(data.scenarios);
         setEvalDetails([]);
-
-        const firstValid = data.scenarios.findIndex(
-          (s: ScenarioResult) => s.replay_data && s.replay_data.length > 0
-        );
+        const firstValid = data.scenarios.findIndex((s: ScenarioResult) => s.replay_data && s.replay_data.length > 0);
         if (firstValid >= 0) {
           const frames = data.scenarios[firstValid].replay_data;
           framesRef.current = frames;
@@ -590,12 +485,7 @@ export default function App() {
   const selectScenario = useCallback((idx: number) => {
     const frames = results[idx]?.replay_data;
     if (!frames || frames.length === 0) return;
-
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     setPlaying(false);
     tickRef.current = 0;
     framesRef.current = frames;
@@ -607,10 +497,7 @@ export default function App() {
   const selectEvalReplay = useCallback((d: EvalDetail) => {
     const frames = d.replay_data;
     if (!frames || frames.length === 0) return;
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     setPlaying(false);
     tickRef.current = 0;
     framesRef.current = frames;
@@ -625,477 +512,378 @@ export default function App() {
   }, []);
 
   const resetPlayback = useCallback(() => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     tickRef.current = 0;
     setPlaying(false);
-    if (framesRef.current.length > 0) {
-      setCurrentFrame(framesRef.current[0]);
-    }
+    if (framesRef.current.length > 0) setCurrentFrame(framesRef.current[0]);
   }, []);
 
   const queues = currentFrame?.queues ?? { N: 0, S: 0, E: 0, W: 0 };
   const DIRS = ['N', 'S', 'E', 'W'] as const;
 
+  // Signal state derived from frame
+  const phase     = currentFrame?.phase ?? null;
+  const inYellow  = currentFrame?.in_yellow ?? false;
+  const nsGreen   = phase === 'NS' && !inYellow;
+  const ewGreen   = phase === 'EW' && !inYellow;
+  const nsRed     = !nsGreen && !inYellow;
+  const ewRed     = !ewGreen && !inYellow;
+
   const leaderboard = overallScore !== null
     ? [
         ...MOCK_LEADERBOARD.filter(e => e.score > overallScore),
-        { rank: 0, username: 'You (current)', score: overallScore, date: 'Now' },
+        { rank: 0, username: 'your_solution.py', score: overallScore, date: 'Now' },
         ...MOCK_LEADERBOARD.filter(e => e.score <= overallScore),
       ].map((e, i) => ({ ...e, rank: i + 1 }))
     : MOCK_LEADERBOARD;
 
+  // ── CSS-in-JS style tokens matching original HTML ──────────────────────────
+  const vars = {
+    bg0: '#0f0f0f', bg1: '#161616', bg2: '#1e1e1e', bg3: '#272727',
+    border: '#2e2e2e', borderHi: '#444',
+    text0: '#e8e8e8', text1: '#a8a8a8', text2: '#666',
+    accent: '#c8ff00', accentDim: 'rgba(200,255,0,0.08)',
+    red: '#ff4545', redDim: 'rgba(255,69,69,0.1)',
+    amber: '#ffaa00', green: '#3ddc84', greenDim: 'rgba(61,220,132,0.1)',
+    blue: '#4c9fff',
+  };
+
   return (
-    <div className="bg-zinc-950 text-zinc-100 h-screen overflow-hidden flex flex-col">
-      <header className="h-10 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 shrink-0">
-        <div className="text-[11px] font-mono font-bold text-[#c8ff00] tracking-widest uppercase mr-8">
+    <div style={{ display: 'grid', gridTemplateRows: '40px 1fr', height: '100vh', background: vars.bg0, color: vars.text0, fontFamily: "'IBM Plex Sans', sans-serif", fontSize: 13 }}>
+
+      {/* TOPBAR */}
+      <div style={{ display: 'flex', alignItems: 'center', background: vars.bg1, borderBottom: `1px solid ${vars.border}`, padding: '0 16px' }}>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: vars.accent, letterSpacing: '0.12em', textTransform: 'uppercase', marginRight: 24 }}>
           TrafficJudge
         </div>
-        <nav className="flex h-full">
-          {(['sim', 'judge', 'lb'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 h-full flex items-center text-[11px] font-mono transition-all border-b-2 ${
-                activeTab === tab
-                  ? 'text-white border-[#c8ff00]'
-                  : 'text-zinc-500 border-transparent hover:text-zinc-300'
-              }`}
-            >
-              {tab === 'sim' ? 'SIMULATION' : tab === 'judge' ? 'SUBMIT' : 'LEADERBOARD'}
-            </button>
-          ))}
-        </nav>
-      </header>
+        {(['sim', 'judge', 'lb'] as const).map((tab) => (
+          <div
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            style={{
+              padding: '0 14px', height: 40, display: 'flex', alignItems: 'center',
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.04em',
+              color: activeTab === tab ? vars.text0 : vars.text2,
+              borderBottom: `2px solid ${activeTab === tab ? vars.accent : 'transparent'}`,
+              cursor: 'pointer', transition: 'color .15s, border-color .15s',
+            }}
+          >
+            {tab === 'sim' ? 'Simulation' : tab === 'judge' ? 'Submit' : 'Leaderboard'}
+          </div>
+        ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2 }}>
+          <span style={{ color: vars.text2 }}>Engine: SUMO / TraCI</span>
+        </div>
+      </div>
 
-      <main className="flex-1 overflow-hidden">
-        <AnimatePresence mode="wait">
-          {activeTab === 'sim' && (
-            <motion.div
-              key="sim"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="h-full flex"
-            >
-              <div className="flex-1 bg-black relative flex items-center justify-center overflow-hidden">
-                <div
-                  className="absolute inset-0 opacity-20 pointer-events-none"
-                  style={{
-                    backgroundImage: 'radial-gradient(circle, #444 1px, transparent 1px)',
-                    backgroundSize: '24px 24px',
-                  }}
-                />
-                <canvas
-                  ref={canvasRef}
-                  width={W}
-                  height={H}
-                  style={{ width: W, height: H }}
-                  className="relative z-10"
-                />
-              </div>
+      {/* PANELS */}
+      <div style={{ overflow: 'hidden', height: '100%' }}>
 
-              <aside className="w-64 bg-zinc-900 border-l border-zinc-800 flex flex-col overflow-y-auto">
-                <div className="p-4 border-b border-zinc-800">
-                  <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                    Signal State
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(['NS', 'EW'] as const).map((dir) => {
-                      const isNS = dir === 'NS';
-                      const green = isNS
-                        ? (currentFrame?.phase === 'NS' && !currentFrame?.in_yellow)
-                        : (currentFrame?.phase === 'EW' && !currentFrame?.in_yellow);
-                      const yellow = currentFrame?.in_yellow ?? false;
-                      const red = !green && !yellow;
+        {/* ── SIMULATION ── */}
+        {activeTab === 'sim' && (
+          <div style={{ display: 'flex', height: '100%' }}>
+            {/* Canvas area */}
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: vars.bg0, position: 'relative', overflow: 'hidden' }}>
+              <div style={{ position: 'absolute', inset: 0, backgroundImage: 'radial-gradient(circle, #2e2e2e 1px, transparent 1px)', backgroundSize: '24px 24px', opacity: 0.4, pointerEvents: 'none' }} />
+              <canvas ref={canvasRef} width={W} height={H} style={{ position: 'relative', zIndex: 1, display: 'block' }} />
+            </div>
 
-                      return (
-                        <div key={dir} className="flex flex-col items-center gap-1">
-                          <div className="text-[9px] font-mono text-zinc-500">
-                            {isNS ? 'N — S' : 'E — W'}
-                          </div>
-                          <div className="bg-black border border-zinc-800 rounded p-1.5 flex flex-col gap-1 items-center">
-                            <div className={`w-2.5 h-2.5 rounded-full transition-all ${red ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' : 'bg-red-950 opacity-20'}`} />
-                            <div className={`w-2.5 h-2.5 rounded-full transition-all ${yellow ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : 'bg-amber-950 opacity-20'}`} />
-                            <div className={`w-2.5 h-2.5 rounded-full transition-all ${green ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-emerald-950 opacity-20'}`} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="flex justify-between items-baseline mt-4">
-                    <span className={`text-[11px] font-mono ${currentFrame?.in_yellow ? 'text-amber-500' : 'text-emerald-500'}`}>
-                      {currentFrame?.in_yellow ? 'YELLOW' : `${currentFrame?.phase ?? '—'} GREEN`}
-                    </span>
-                    <span className="text-lg font-mono font-bold text-[#c8ff00]">
-                      {currentFrame ? Math.floor(currentFrame.tick) : '—'}
-                    </span>
-                  </div>
-                </div>
+            {/* Sidebar */}
+            <div style={{ width: 240, background: vars.bg1, borderLeft: `1px solid ${vars.border}`, display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
 
-                <div className="p-4 border-b border-zinc-800">
-                  <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                    Queue Depth
-                  </div>
-                  {DIRS.map((dir) => (
-                    <div key={dir} className="mb-2">
-                      <div className="flex justify-between text-[10px] font-mono text-zinc-400 mb-1">
-                        <span>{dir}</span>
-                        <span>{queues[dir]}</span>
-                      </div>
-                      <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
-                        <motion.div
-                          className={`h-full rounded-full ${queues[dir] > 8 ? 'bg-red-500' : queues[dir] > 4 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                          animate={{ width: `${Math.min(100, (queues[dir] / 15) * 100)}%` }}
-                        />
+              {/* Signal state */}
+              <div style={{ borderBottom: `1px solid ${vars.border}`, padding: '12px 14px' }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>Signal State</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  {([['N — S', nsGreen, nsRed], ['E — W', ewGreen, ewRed]] as [string, boolean, boolean][]).map(([label, green, red]) => (
+                    <div key={label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: vars.text2 }}>{label}</div>
+                      <div style={{ background: '#111', border: `1px solid ${vars.border}`, borderRadius: 4, padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'center' }}>
+                        {[
+                          { on: red || inYellow, cls: '#ff4545', glow: '#ff4545aa' },
+                          { on: inYellow, cls: '#ffaa00', glow: '#ffaa00aa' },
+                          { on: green,    cls: '#3ddc84', glow: '#3ddc84aa' },
+                        ].map((dot, i) => (
+                          <div key={i} style={{ width: 10, height: 10, borderRadius: '50%', background: dot.on ? dot.cls : 'transparent', border: dot.on ? 'none' : `1px solid ${vars.border}`, opacity: dot.on ? 1 : 0.2, boxShadow: dot.on ? `0 0 6px ${dot.glow}` : 'none', transition: 'opacity .25s, box-shadow .25s' }} />
+                        ))}
                       </div>
                     </div>
                   ))}
                 </div>
-
-                <div className="p-4 border-b border-zinc-800">
-                  <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                    Playback
-                  </div>
-                  <div className="flex gap-2 mb-4">
-                    <button
-                      onClick={togglePlay}
-                      disabled={!currentFrame}
-                      className={`flex-1 py-1.5 rounded text-[11px] font-mono flex items-center justify-center gap-2 transition-all disabled:opacity-30 ${
-                        playing
-                          ? 'bg-red-500/10 text-red-500 border border-red-500/50 hover:bg-red-500/20'
-                          : 'bg-[#c8ff00]/10 text-[#c8ff00] border border-[#c8ff00]/50 hover:bg-[#c8ff00]/20'
-                      }`}
-                    >
-                      {playing ? <Pause size={12} /> : <Play size={12} />}
-                      {playing ? ' PAUSE' : ' PLAY'}
-                    </button>
-                    <button
-                      onClick={resetPlayback}
-                      disabled={!currentFrame}
-                      className="p-1.5 bg-zinc-800 border border-zinc-700 rounded text-zinc-400 hover:text-white disabled:opacity-30"
-                    >
-                      <RotateCcw size={14} />
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <label className="text-[10px] font-mono text-zinc-500 w-10">Speed</label>
-                    <input
-                      type="range" min={1} max={20} value={playbackSpeed}
-                      onChange={(e) => setPlaybackSpeed(parseInt(e.target.value))}
-                      className="flex-1 accent-[#c8ff00] h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer"
-                    />
-                    <span className="text-[10px] font-mono text-zinc-100 w-6 text-right">{playbackSpeed}x</span>
-                  </div>
-                </div>
-
-                {results.length > 0 && (
-                  <div className="p-4 flex-1">
-                    <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                      Results — Click to Replay
-                    </div>
-                    <div className="space-y-2">
-                      {results.map((r, i) => (
-                        <button
-                          key={i}
-                          onClick={() => selectScenario(i)}
-                          className={`w-full text-left p-2 rounded border transition-all ${
-                            selectedScenario === i
-                              ? 'border-[#c8ff00] bg-[#c8ff00]/5'
-                              : 'border-zinc-800 hover:border-zinc-600'
-                          }`}
-                        >
-                          <div className="flex justify-between items-center">
-                            <span className="text-[10px] font-mono text-zinc-300">{r.name}</span>
-                            <span className="text-[10px] font-mono text-[#c8ff00]">{r.score}</span>
-                          </div>
-                          {r.error && (
-                            <div className="text-[9px] font-mono text-red-400 mt-1">{r.error}</div>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </aside>
-            </motion.div>
-          )}
-
-          {activeTab === 'judge' && (
-            <motion.div
-              key="judge"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="h-full flex"
-            >
-              <div className="flex-1 flex flex-col border-r border-zinc-800">
-                <div className="h-10 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 justify-between">
-                  <span className="text-[11px] font-mono text-zinc-400">controller.py</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-wider">
-                      Engine: SUMO / TraCI
-                    </span>
-                    <button
-                      onClick={() => setCode(DEFAULT_CODE)}
-                      className="text-[10px] font-mono px-2 py-1 bg-zinc-800 rounded hover:bg-zinc-700"
-                    >
-                      Reset
-                    </button>
-                  </div>
-                </div>
-                <textarea
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  className="flex-1 bg-black p-6 font-mono text-xs leading-relaxed outline-none resize-none text-zinc-300"
-                  spellCheck={false}
-                />
-                <div className="p-4 bg-zinc-900 border-t border-zinc-800 flex items-center gap-4">
-                  <button
-                    onClick={runJudge}
-                    disabled={isJudging}
-                    className="px-6 py-2 bg-[#c8ff00] text-black font-mono font-bold text-[11px] rounded hover:bg-[#d4ff33] disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {isJudging ? <Activity size={14} className="animate-pulse" /> : <Zap size={14} />}
-                    RUN JUDGE (5 SCENARIOS)
-                  </button>
-                  <span className="text-[10px] font-mono text-zinc-500">
-                    {isJudging
-                      ? 'Running 5 simulations...'
-                      : overallScore !== null
-                      ? `Score: ${overallScore}/100`
-                      : 'Ready for submission'}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 8 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: inYellow ? vars.amber : vars.green }}>
+                    {phase ? (inYellow ? 'Yellow' : `${phase} Green`) : '—'}
+                  </span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: vars.accent }}>
+                    {currentFrame ? currentFrame.tick : '—'}
                   </span>
                 </div>
               </div>
 
-              <aside className="w-80 bg-zinc-900 flex flex-col overflow-y-auto">
-                {isJudging ? (
-                  <div className="flex-1 flex flex-col items-center justify-center p-8">
-                    <Loader2 size={32} className="text-[#c8ff00] animate-spin mb-4" />
-                    <div className="text-[12px] font-mono text-zinc-300 text-center leading-relaxed">
-                      Running simulations across 5 difficulty levels...
-                    </div>
-                    <div className="text-[10px] font-mono text-zinc-600 mt-2">Please wait</div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="p-8 border-b border-zinc-800 text-center">
-                      <div className={`text-5xl font-mono font-bold mb-1 ${
-                        overallScore !== null
-                          ? overallScore >= 80 ? 'text-emerald-400 drop-shadow-[0_0_20px_rgba(52,211,153,0.5)]'
-                          : overallScore >= 60 ? 'text-amber-400 drop-shadow-[0_0_20px_rgba(251,191,36,0.5)]'
-                          : 'text-red-400 drop-shadow-[0_0_20px_rgba(248,113,113,0.5)]'
-                          : 'text-zinc-100'
-                      }`}>
-                        {overallScore !== null ? overallScore : '—'}
+              {/* Queue depth */}
+              <div style={{ borderBottom: `1px solid ${vars.border}`, padding: '12px 14px' }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>Queue Depth</div>
+                {DIRS.map((dir) => {
+                  const count = queues[dir];
+                  const pct = Math.min(100, (count / 15) * 100);
+                  const barColor = count >= 8 ? vars.red : count >= 4 ? vars.amber : vars.green;
+                  return (
+                    <div key={dir} style={{ marginBottom: 4 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text1, marginBottom: 2 }}>
+                        <span>{dir}</span><span>{count}</span>
                       </div>
-                      <div className="text-[11px] font-mono text-zinc-500">/ 100</div>
-                      <div className="text-[9px] font-mono text-zinc-600 mt-4 uppercase tracking-widest">
-                        {overallScore !== null ? 'EVALUATION COMPLETE' : 'SUBMIT TO SEE SCORE'}
+                      <div style={{ height: 4, background: vars.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 2, transition: 'width .3s, background .3s' }} />
                       </div>
                     </div>
+                  );
+                })}
+              </div>
 
-                    <div className="p-4 border-b border-zinc-800">
-                      <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                        Scenario Breakdown
-                      </div>
-                      {evalDetails.length === 0 ? (
-                        results.length === 0 ? (
-                          <div className="text-[10px] font-mono text-zinc-600">
-                            No results yet. Submit code to evaluate.
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {results.map((s, i) => (
-                              <button
-                                key={i}
-                                onClick={() => selectScenario(i)}
-                                className="w-full text-left flex items-center gap-3 p-2 bg-black/20 rounded border border-zinc-800/50 hover:border-zinc-600 transition-all"
-                              >
-                                <div className="flex-1">
-                                  <div className="text-[10px] font-mono text-zinc-300 mb-1">{s.name}</div>
-                                  <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
-                                    <div
-                                      className={`h-full transition-all duration-500 ${s.score >= 80 ? 'bg-emerald-500' : s.score >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}
-                                      style={{ width: `${s.score}%` }}
-                                    />
-                                  </div>
-                                </div>
-                                <div className="text-[10px] font-mono text-zinc-500 w-8 text-right">{s.score}</div>
-                                <ChevronRight size={12} className="text-zinc-600" />
-                              </button>
-                            ))}
-                          </div>
-                        )
-                      ) : (
-                        <div className="space-y-2.5">
-                          {evalDetails.map((d, i) => {
-                            const name =
-                              d.level_label ?? LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
-                            const statusOk = d.status === 'OK';
-                            const scoreColor = d.score >= 80 ? 'text-emerald-400' : d.score >= 60 ? 'text-amber-400' : 'text-red-400';
-                            const barColor = d.score >= 80 ? 'bg-emerald-500' : d.score >= 60 ? 'bg-amber-500' : 'bg-red-500';
-                            const errText = d.error_log ?? d.error;
-                            const canReplay = Boolean(d.replay_data && d.replay_data.length > 0);
-
-                            return (
-                              <div
-                                key={i}
-                                role={canReplay ? 'button' : undefined}
-                                tabIndex={canReplay ? 0 : undefined}
-                                onClick={() => canReplay && selectEvalReplay(d)}
-                                onKeyDown={(e) => {
-                                  if (canReplay && (e.key === 'Enter' || e.key === ' ')) {
-                                    e.preventDefault();
-                                    selectEvalReplay(d);
-                                  }
-                                }}
-                                className={`bg-black/30 rounded-lg border border-zinc-800/60 p-3 transition-all ${
-                                  canReplay
-                                    ? 'hover:border-[#c8ff00]/50 cursor-pointer'
-                                    : 'hover:border-zinc-700'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between mb-2">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] font-mono text-zinc-500">L{d.level}</span>
-                                    <span className="text-[11px] font-mono font-semibold text-zinc-200">{name}</span>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                                      statusOk
-                                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                                        : 'bg-red-500/10 text-red-400 border border-red-500/30'
-                                    }`}>
-                                      {d.status}
-                                    </span>
-                                    <span className={`text-[11px] font-mono font-bold ${scoreColor}`}>
-                                      {d.score ?? '—'}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mb-2.5">
-                                  <div
-                                    className={`h-full rounded-full transition-all duration-700 ${barColor}`}
-                                    style={{ width: `${Math.min(100, d.score ?? 0)}%` }}
-                                  />
-                                </div>
-
-                                <div className="flex gap-1.5">
-                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
-                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Delay</div>
-                                    <div className="text-[10px] font-mono text-zinc-300">{d.total_delay ?? '—'}</div>
-                                  </div>
-                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
-                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Max Q</div>
-                                    <div className="text-[10px] font-mono text-zinc-300">{d.max_queue_length ?? '—'}</div>
-                                  </div>
-                                  <div className="flex-1 bg-zinc-800/50 rounded px-2 py-1 text-center">
-                                    <div className="text-[8px] font-mono text-zinc-500 uppercase">Through</div>
-                                    <div className="text-[10px] font-mono text-zinc-300">{d.throughput ?? '—'}</div>
-                                  </div>
-                                </div>
-                                {errText && !statusOk && (
-                                  <pre className="mt-2 p-2 rounded bg-red-950/40 border border-red-900/50 text-[9px] font-mono text-red-300 whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
-                                    {errText}
-                                  </pre>
-                                )}
-                                {canReplay && (
-                                  <div className="mt-2 text-[9px] font-mono text-[#c8ff00]/80">
-                                    Click to open replay in Simulation
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="p-4">
-                      <div className="text-[9px] font-mono font-bold text-zinc-500 uppercase tracking-widest mb-3">
-                        How It Works
-                      </div>
-                      <div className="text-[10px] font-mono text-zinc-500 leading-relaxed space-y-2">
-                        <p>1. Write a <code className="text-[#c8ff00]">control()</code> function in Python.</p>
-                        <p>2. Click RUN JUDGE to submit.</p>
-                        <p>3. The backend runs a real traffic simulation for 5 scenarios.</p>
-                        <p>4. Click any scenario to watch the replay.</p>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </aside>
-            </motion.div>
-          )}
-
-          {activeTab === 'lb' && (
-            <motion.div
-              key="lb"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="h-full flex items-center justify-center"
-            >
-              <div className="w-full max-w-2xl bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-                <div className="p-6 border-b border-zinc-800 flex items-center gap-3">
-                  <Trophy size={24} className="text-[#c8ff00]" />
-                  <div>
-                    <h2 className="text-lg font-mono font-bold text-zinc-100">Leaderboard</h2>
-                    <p className="text-[10px] font-mono text-zinc-500">Top submissions across all scenarios</p>
-                  </div>
+              {/* Playback */}
+              <div style={{ borderBottom: `1px solid ${vars.border}`, padding: '12px 14px' }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>Playback</div>
+                <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                  <button
+                    onClick={togglePlay}
+                    disabled={!currentFrame}
+                    style={{
+                      flex: 1, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, padding: '6px 12px',
+                      border: `1px solid ${playing ? vars.red : vars.accent}`,
+                      background: playing ? vars.redDim : vars.accentDim,
+                      color: playing ? vars.red : vars.accent,
+                      cursor: 'pointer', borderRadius: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      opacity: !currentFrame ? 0.4 : 1,
+                    }}
+                  >
+                    {playing ? <Pause size={11} /> : <Play size={11} />}
+                    {playing ? 'Pause' : 'Play'}
+                  </button>
+                  <button
+                    onClick={resetPlayback}
+                    disabled={!currentFrame}
+                    style={{
+                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, padding: '6px 10px',
+                      border: `1px solid ${vars.borderHi}`, background: vars.bg3, color: vars.text0,
+                      cursor: 'pointer', borderRadius: 3, opacity: !currentFrame ? 0.4 : 1,
+                    }}
+                  >
+                    <RotateCcw size={12} />
+                  </button>
                 </div>
-
-                <div className="divide-y divide-zinc-800/50">
-                  {leaderboard.map((entry) => {
-                    const isYou = entry.username === 'You (current)';
-                    const rankColor = entry.rank === 1 ? 'text-yellow-400' : entry.rank === 2 ? 'text-zinc-300' : entry.rank === 3 ? 'text-amber-600' : 'text-zinc-500';
-
-                    return (
-                      <div
-                        key={entry.username + entry.date}
-                        className={`flex items-center gap-4 px-6 py-3 transition-all ${
-                          isYou ? 'bg-[#c8ff00]/5 border-l-2 border-[#c8ff00]' : ''
-                        }`}
-                      >
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-mono font-bold text-sm ${rankColor}`}>
-                          {entry.rank <= 3 ? <Trophy size={14} /> : entry.rank}
-                        </div>
-                        <div className="flex-1">
-                          <div className={`text-[13px] font-mono font-semibold ${isYou ? 'text-[#c8ff00]' : 'text-zinc-200'}`}>
-                            {entry.username}
-                          </div>
-                          <div className="text-[9px] font-mono text-zinc-600">{entry.date}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-lg font-mono font-bold ${entry.score >= 90 ? 'text-emerald-400' : entry.score >= 70 ? 'text-amber-400' : 'text-zinc-400'}`}>
-                            {entry.score}
-                          </div>
-                          <div className="text-[9px] font-mono text-zinc-600">/ 100</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="p-4 border-t border-zinc-800 bg-zinc-900/50">
-                  <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-600">
-                    <Users size={12} />
-                    <span>{leaderboard.length} total submissions</span>
-                    {overallScore !== null && (
-                      <span className="ml-auto text-[#c8ff00]">Your best: {overallScore}</span>
-                    )}
-                  </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label style={{ fontSize: 10, color: vars.text1, width: 40, fontFamily: "'IBM Plex Mono', monospace" }}>Speed</label>
+                  <input
+                    type="range" min={1} max={20} value={playbackSpeed}
+                    onChange={(e) => setPlaybackSpeed(parseInt(e.target.value))}
+                    style={{ flex: 1, accentColor: vars.accent }}
+                  />
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text0, width: 28, textAlign: 'right' }}>{playbackSpeed}x</span>
                 </div>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+
+              {/* Scenario list (after eval) */}
+              {(results.length > 0 || evalDetails.length > 0) && (
+                <div style={{ padding: '12px 14px', flex: 1 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>Results — Click to Replay</div>
+                  {evalDetails.length > 0 ? evalDetails.map((d, i) => {
+                    const name = d.level_label ?? LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
+                    const can = Boolean(d.replay_data && d.replay_data.length > 0);
+                    const sc  = d.score ?? 0;
+                    return (
+                      <button key={i} onClick={() => can && selectEvalReplay(d)}
+                        style={{ width: '100%', textAlign: 'left', padding: '6px 8px', background: 'transparent', border: `1px solid ${vars.border}`, borderRadius: 3, cursor: can ? 'pointer' : 'default', marginBottom: 4, color: vars.text0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 }}>
+                          <span style={{ color: vars.text1 }}>L{d.level} {name}</span>
+                          <span style={{ color: sc >= 75 ? vars.green : sc >= 50 ? vars.amber : vars.red }}>{sc}</span>
+                        </div>
+                      </button>
+                    );
+                  }) : results.map((r, i) => (
+                    <button key={i} onClick={() => selectScenario(i)}
+                      style={{ width: '100%', textAlign: 'left', padding: '6px 8px', background: selectedScenario === i ? vars.accentDim : 'transparent', border: `1px solid ${selectedScenario === i ? vars.accent : vars.border}`, borderRadius: 3, cursor: 'pointer', marginBottom: 4, color: vars.text0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 }}>
+                        <span style={{ color: vars.text1 }}>{r.name}</span>
+                        <span style={{ color: vars.accent }}>{r.score}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── SUBMIT ── */}
+        {activeTab === 'judge' && (
+          <div style={{ display: 'flex', height: '100%' }}>
+            {/* Editor */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${vars.border}` }}>
+              <div style={{ padding: '10px 16px', background: vars.bg1, borderBottom: `1px solid ${vars.border}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: vars.text1, flex: 1 }}>controller.py — traffic light controller</span>
+                {Object.keys(EXAMPLES).map((key) => (
+                  <button key={key} onClick={() => setCode(EXAMPLES[key])}
+                    style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, padding: '4px 10px', border: `1px solid ${vars.borderHi}`, background: vars.bg3, color: vars.text1, cursor: 'pointer', borderRadius: 2 }}>
+                    {key.charAt(0).toUpperCase() + key.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                spellCheck={false}
+                style={{ flex: 1, padding: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, lineHeight: 1.65, background: vars.bg0, border: 'none', color: vars.text0, resize: 'none', outline: 'none', tabSize: 4 }}
+              />
+              <div style={{ padding: '8px 16px', background: vars.bg1, borderTop: `1px solid ${vars.border}`, display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  onClick={runJudge}
+                  disabled={isJudging}
+                  style={{
+                    fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, padding: '6px 20px',
+                    border: `1px solid ${vars.accent}`, background: vars.accentDim, color: vars.accent,
+                    cursor: isJudging ? 'not-allowed' : 'pointer', borderRadius: 3,
+                    display: 'flex', alignItems: 'center', gap: 6, opacity: isJudging ? 0.6 : 1,
+                  }}
+                >
+                  {isJudging ? <><Loader2 size={12} className="animate-spin" /> Running...</> : <><Zap size={12} /> Run Judge (5 scenarios)</>}
+                </button>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2, marginLeft: 'auto' }}>
+                  {isJudging ? 'Evaluating via SUMO / TraCI...' : overallScore !== null ? `Score: ${overallScore}/100` : 'Not submitted'}
+                </span>
+              </div>
+            </div>
+
+            {/* Results sidebar */}
+            <div style={{ width: 280, background: vars.bg1, display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+              {isJudging ? (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 32 }}>
+                  <Loader2 size={32} style={{ color: vars.accent, marginBottom: 16 }} className="animate-spin" />
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: vars.text1, textAlign: 'center', lineHeight: 1.8 }}>Running simulations across 5 difficulty levels...</div>
+                </div>
+              ) : (
+                <>
+                  {/* Score hero */}
+                  <div style={{ padding: '20px 16px', borderBottom: `1px solid ${vars.border}`, textAlign: 'center' }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 48, fontWeight: 600, lineHeight: 1, color: overallScore !== null ? (overallScore >= 75 ? vars.green : overallScore >= 50 ? vars.amber : vars.red) : vars.text0 }}>
+                      {overallScore !== null ? overallScore : '—'}
+                    </div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, color: vars.text2 }}>/ 100</div>
+                    <div style={{ fontSize: 11, color: vars.text2, marginTop: 6, fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {overallScore !== null ? 'evaluation complete' : 'submit to see score'}
+                    </div>
+                  </div>
+
+                  {/* Scenario list */}
+                  <div style={{ padding: '12px 14px', borderBottom: `1px solid ${vars.border}` }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>Scenarios</div>
+                    {evalDetails.length > 0 ? evalDetails.map((d, i) => {
+                      const name = d.level_label ?? LEVEL_NAMES[d.level] ?? `Level ${d.level}`;
+                      const sc   = d.score ?? 0;
+                      const barColor = sc >= 75 ? vars.green : sc >= 50 ? vars.amber : vars.red;
+                      const can  = Boolean(d.replay_data && d.replay_data.length > 0);
+                      return (
+                        <div key={i} onClick={() => can && selectEvalReplay(d)} style={{ marginBottom: 8, cursor: can ? 'pointer' : 'default' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text1 }}>L{d.level} {name}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2 }}>{sc}</span>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, padding: '1px 5px', borderRadius: 2, background: d.status === 'OK' ? vars.greenDim : vars.redDim, color: d.status === 'OK' ? vars.green : vars.red, border: `1px solid ${d.status === 'OK' ? vars.green : vars.red}` }}>
+                                {d.status}
+                              </span>
+                            </div>
+                          </div>
+                          <div style={{ height: 3, background: vars.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${Math.min(100, sc)}%`, background: barColor, borderRadius: 2, transition: 'width .4s' }} />
+                          </div>
+                          {d.error && d.status !== 'OK' && (
+                            <div style={{ marginTop: 4, fontSize: 9, fontFamily: "'IBM Plex Mono', monospace", color: vars.red }}>{d.error}</div>
+                          )}
+                        </div>
+                      );
+                    }) : results.length > 0 ? results.map((s, i) => {
+                      const sc = typeof s.score === 'number' ? s.score : 0;
+                      const barColor = sc >= 75 ? vars.green : sc >= 50 ? vars.amber : vars.red;
+                      return (
+                        <div key={i} onClick={() => selectScenario(i)} style={{ marginBottom: 8, cursor: 'pointer' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text1 }}>{s.name}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2 }}>{sc}</span>
+                          </div>
+                          <div style={{ height: 3, background: vars.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${sc}%`, background: barColor, borderRadius: 2 }} />
+                          </div>
+                        </div>
+                      );
+                    }) : (
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2 }}>Submit code to evaluate.</div>
+                    )}
+                  </div>
+
+                  {/* How it works */}
+                  <div style={{ padding: '12px 14px', flex: 1 }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 10 }}>How It Works</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2, lineHeight: 1.8 }}>
+                      <div>1. Write a <span style={{ color: vars.accent }}>control()</span> function.</div>
+                      <div>2. Click Run Judge to submit.</div>
+                      <div>3. Backend runs real SUMO simulation via TraCI across 5 scenarios.</div>
+                      <div>4. Click any scenario to watch the replay.</div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── LEADERBOARD ── */}
+        {activeTab === 'lb' && (
+          <div style={{ padding: 24, overflowY: 'auto', height: '100%', display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 400 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 12 }}>Global Rankings</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: "'IBM Plex Mono', monospace" }}>
+                <thead>
+                  <tr>
+                    {['#', 'submission', 'score', 'date'].map((h) => (
+                      <th key={h} style={{ fontSize: 9, fontWeight: 600, color: vars.text2, textTransform: 'uppercase', letterSpacing: '0.1em', textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${vars.border}` }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderboard.map((e) => {
+                    const isYou = e.username === 'your_solution.py';
+                    return (
+                      <tr key={e.username + e.date} style={{ background: isYou ? 'rgba(200,255,0,0.04)' : 'transparent' }}>
+                        <td style={{ padding: '10px 12px', borderBottom: `1px solid ${vars.border}`, fontSize: 12, color: isYou ? vars.accent : vars.text2 }}>{e.rank}</td>
+                        <td style={{ padding: '10px 12px', borderBottom: `1px solid ${vars.border}`, fontSize: 12, color: isYou ? vars.accent : vars.text0 }}>{e.username}</td>
+                        <td style={{ padding: '10px 12px', borderBottom: `1px solid ${vars.border}`, fontSize: 12, color: vars.accent, fontWeight: 500 }}>{e.score}</td>
+                        <td style={{ padding: '10px 12px', borderBottom: `1px solid ${vars.border}`, fontSize: 12, color: vars.text1 }}>{e.date}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ width: 220 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 12 }}>Your Stats</div>
+              {[['Best score', overallScore ?? '—'], ['Submissions', overallScore !== null ? 1 : 0]].map(([k, v]) => (
+                <div key={String(k)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5 }}>
+                  <span style={{ fontSize: 11, color: vars.text1 }}>{k}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: vars.text0 }}>{String(v)}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 20, padding: 12, background: vars.bg2, border: `1px solid ${vars.border}`, borderRadius: 4 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 600, color: vars.text2, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 8 }}>Hint</div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2, lineHeight: 1.8 }}>
+                  Compare queue sums:<br />
+                  if queues['N'] + queues['S']<br />
+                  &gt; queues['E'] + queues['W']:<br />
+                  &nbsp;&nbsp;bias toward NS phase
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

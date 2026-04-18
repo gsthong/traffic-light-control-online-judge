@@ -1,16 +1,1189 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-    <title>Traffic Light Control — Online Judge</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Traffic Light Control — Online Judge</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg0: #0f0f0f;
+  --bg1: #161616;
+  --bg2: #1e1e1e;
+  --bg3: #272727;
+  --border: #2e2e2e;
+  --border-hi: #444;
+  --text0: #e8e8e8;
+  --text1: #a8a8a8;
+  --text2: #666;
+  --accent: #c8ff00;
+  --accent-dim: rgba(200,255,0,0.08);
+  --red: #ff4545;
+  --red-dim: rgba(255,69,69,0.1);
+  --amber: #ffaa00;
+  --green: #3ddc84;
+  --green-dim: rgba(61,220,132,0.1);
+  --blue: #4c9fff;
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'IBM Plex Sans', sans-serif;
+}
+
+html, body { height: 100%; background: var(--bg0); color: var(--text0); font-family: var(--sans); font-size: 13px; }
+
+#shell { display: grid; grid-template-rows: 40px 1fr; height: 100vh; }
+
+/* TOPBAR */
+#topbar {
+  display: flex; align-items: center; gap: 0;
+  background: var(--bg1); border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+#topbar .logo { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; margin-right: 24px; }
+.tab { padding: 0 14px; height: 40px; display: flex; align-items: center; font-size: 11px; font-family: var(--mono); color: var(--text2); cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; letter-spacing: .04em; }
+.tab:hover { color: var(--text1); }
+.tab.active { color: var(--text0); border-bottom-color: var(--accent); }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 10px; color: var(--text2); }
+.topbar-right a { color: var(--text2); text-decoration: none; transition: color .15s; }
+.topbar-right a:hover { color: var(--accent); }
+
+/* PANELS */
+.panel { display: none; height: 100%; overflow: hidden; }
+.panel.active { display: flex; }
+
+/* SIM PANEL */
+#sim-panel { flex-direction: row; gap: 0; }
+#canvas-wrap {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  background: var(--bg0); position: relative; overflow: hidden;
+}
+#canvas-wrap::before {
+  content: ''; position: absolute; inset: 0;
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px; opacity: .4; pointer-events: none;
+}
+#sim-canvas { display: block; position: relative; z-index: 1; }
+#sim-right { width: 240px; background: var(--bg1); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; }
+
+/* SIDEBAR BLOCKS */
+.sb-block { border-bottom: 1px solid var(--border); padding: 12px 14px; }
+.sb-label { font-family: var(--mono); font-size: 9px; font-weight: 600; color: var(--text2); letter-spacing: .12em; text-transform: uppercase; margin-bottom: 10px; }
+
+/* Traffic light widget */
+.tl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tl-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.tl-dir { font-family: var(--mono); font-size: 9px; color: var(--text2); }
+.tl-box { background: #111; border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; display: flex; flex-direction: column; gap: 3px; align-items: center; }
+.tl-dot { width: 10px; height: 10px; border-radius: 50%; transition: opacity .25s, box-shadow .25s; }
+.tl-dot.off { opacity: .12; background: #333; }
+.tl-dot.on.r { background: #ff4545; box-shadow: 0 0 6px #ff4545aa; opacity: 1; }
+.tl-dot.on.y { background: #ffaa00; box-shadow: 0 0 6px #ffaa00aa; opacity: 1; }
+.tl-dot.on.g { background: #3ddc84; box-shadow: 0 0 6px #3ddc84aa; opacity: 1; }
+
+.phase-info { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; }
+.phase-name { font-family: var(--mono); font-size: 11px; color: var(--text0); }
+.phase-countdown { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--accent); }
+
+/* Metrics */
+.metric-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+.metric-key { font-size: 11px; color: var(--text1); }
+.metric-val { font-family: var(--mono); font-size: 12px; color: var(--text0); }
+.metric-val.warn { color: var(--amber); }
+.metric-val.bad  { color: var(--red); }
+.metric-val.good { color: var(--green); }
+
+/* Queue bars */
+.queue-bar-wrap { margin-bottom: 4px; }
+.queue-bar-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--text1); margin-bottom: 2px; }
+.queue-bar-track { height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.queue-bar-fill  { height: 100%; border-radius: 2px; transition: width .3s, background .3s; }
+
+/* Controls */
+.ctrl-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.btn { font-family: var(--mono); font-size: 11px; padding: 6px 12px; border: 1px solid var(--border-hi); background: var(--bg3); color: var(--text0); cursor: pointer; border-radius: 3px; transition: all .15s; flex: 1; }
+.btn:hover { border-color: var(--text1); }
+.btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn.primary:hover { background: var(--accent-dim); }
+.btn.danger  { border-color: var(--red); color: var(--red); }
+.btn.danger:hover  { background: var(--red-dim); }
+
+.range-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.range-row label { font-size: 10px; color: var(--text1); width: 40px; }
+.range-row input[type=range] { flex: 1; accent-color: var(--accent); }
+.range-row .range-val { font-family: var(--mono); font-size: 10px; color: var(--text0); width: 24px; text-align: right; }
+
+/* Log */
+#log-area { font-family: var(--mono); font-size: 10px; line-height: 1.7; color: var(--text2); height: 90px; overflow-y: auto; }
+#log-area .lg-ok   { color: var(--green); }
+#log-area .lg-info { color: var(--blue); }
+#log-area .lg-warn { color: var(--amber); }
+#log-area .lg-err  { color: var(--red); }
+
+/* JUDGE PANEL */
+#judge-panel { flex-direction: row; gap: 0; }
+#editor-col { flex: 1; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.editor-header { padding: 10px 16px; background: var(--bg1); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+.editor-header .hdr-title { font-family: var(--mono); font-size: 11px; color: var(--text1); flex: 1; }
+.editor-header .hdr-btn { font-family: var(--mono); font-size: 10px; padding: 4px 10px; border: 1px solid var(--border-hi); background: var(--bg3); color: var(--text1); cursor: pointer; border-radius: 2px; transition: all .15s; }
+.editor-header .hdr-btn:hover { color: var(--text0); }
+#code-area { flex: 1; position: relative; background: var(--bg0); }
+#code-input { width: 100%; height: 100%; padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 1.65; background: var(--bg0); border: none; color: var(--text0); resize: none; outline: none; tab-size: 4; }
+.editor-footer { padding: 8px 16px; background: var(--bg1); border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+#judge-col { width: 280px; background: var(--bg1); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; }
+
+/* Score */
+.score-hero { padding: 20px 16px; border-bottom: 1px solid var(--border); text-align: center; }
+.score-num   { font-family: var(--mono); font-size: 48px; font-weight: 600; line-height: 1; color: var(--text0); }
+.score-denom { font-family: var(--mono); font-size: 14px; color: var(--text2); }
+.score-sub   { font-size: 11px; color: var(--text2); margin-top: 6px; font-family: var(--mono); }
+
+/* Test rows */
+.test-item { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.test-item .t-name { flex: 1; font-size: 11px; color: var(--text1); }
+.test-item .t-bar  { width: 60px; height: 3px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.test-item .t-bar-fill { height: 100%; border-radius: 2px; transition: width .4s; background: var(--text2); }
+.test-item .t-score { font-family: var(--mono); font-size: 11px; width: 38px; text-align: right; color: var(--text2); }
+
+/* Badges */
+.badge { font-family: var(--mono); font-size: 9px; padding: 2px 6px; border-radius: 2px; letter-spacing: .06em; }
+.badge-pending { background: var(--bg3); color: var(--text2); }
+.badge-running { background: rgba(76,159,255,.15); color: var(--blue); }
+.badge-pass    { background: var(--green-dim); color: var(--green); }
+.badge-partial { background: rgba(255,170,0,.12); color: var(--amber); }
+.badge-fail    { background: var(--red-dim); color: var(--red); }
+
+/* LEADERBOARD */
+#lb-panel { padding: 24px; flex-direction: column; gap: 16px; overflow-y: auto; }
+.lb-table { width: 100%; border-collapse: collapse; font-family: var(--mono); }
+.lb-table th { font-size: 9px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .1em; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.lb-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.lb-table tr:hover td { background: var(--bg2); }
+.lb-table .rank-col  { color: var(--text2); width: 40px; }
+.lb-table .name-col  { color: var(--text0); }
+.lb-table .score-col { color: var(--accent); font-weight: 500; }
+.lb-table .wait-col, .lb-table .thru-col { color: var(--text1); }
+.lb-table tr.you td  { background: rgba(200,255,0,.04); }
+.lb-table tr.you .rank-col { color: var(--accent); }
+
+/* SETUP PANEL */
+#setup-panel { padding: 0; flex-direction: row; overflow: hidden; }
+#setup-nav { width: 180px; background: var(--bg1); border-right: 1px solid var(--border); padding: 16px 0; flex-shrink: 0; }
+.setup-nav-item { padding: 8px 16px; font-family: var(--mono); font-size: 11px; color: var(--text2); cursor: pointer; transition: color .15s, background .15s; }
+.setup-nav-item:hover  { color: var(--text1); background: var(--bg2); }
+.setup-nav-item.active { color: var(--accent); background: var(--accent-dim); }
+#setup-content { flex: 1; overflow-y: auto; padding: 28px 36px; max-width: 780px; }
+.doc-h1   { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--text0); margin-bottom: 6px; }
+.doc-h2   { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--text0); margin: 24px 0 8px; border-left: 2px solid var(--accent); padding-left: 10px; }
+.doc-p    { font-size: 12px; color: var(--text1); line-height: 1.8; margin-bottom: 12px; }
+.doc-code { font-family: var(--mono); font-size: 11px; background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 12px 16px; color: var(--text0); margin: 10px 0; line-height: 1.7; white-space: pre; overflow-x: auto; }
+.doc-link { color: var(--accent); text-decoration: none; font-family: var(--mono); font-size: 11px; }
+.doc-link:hover { text-decoration: underline; }
+.doc-note { background: rgba(76,159,255,.08); border: 1px solid rgba(76,159,255,.2); border-radius: 3px; padding: 10px 14px; font-size: 11px; color: var(--blue); line-height: 1.7; margin: 12px 0; font-family: var(--mono); }
+.doc-warn { background: rgba(255,170,0,.08); border: 1px solid rgba(255,170,0,.2); border-radius: 3px; padding: 10px 14px; font-size: 11px; color: var(--amber); line-height: 1.7; margin: 12px 0; font-family: var(--mono); }
+.step-num { display: inline-block; background: var(--accent); color: #000; font-family: var(--mono); font-size: 10px; font-weight: 700; width: 18px; height: 18px; border-radius: 2px; text-align: center; line-height: 18px; margin-right: 8px; }
+.doc-step { display: flex; align-items: flex-start; gap: 0; margin-bottom: 14px; }
+.doc-step-body { font-size: 12px; color: var(--text1); line-height: 1.8; flex: 1; }
+
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="shell">
+
+  <!-- TOPBAR -->
+  <div id="topbar">
+    <div class="logo">TrafficJudge</div>
+    <div class="tab active" onclick="switchTab('sim',this)">Simulation</div>
+    <div class="tab" onclick="switchTab('judge',this)">Submit</div>
+    <div class="tab" onclick="switchTab('lb',this)">Leaderboard</div>
+    <div class="tab" onclick="switchTab('setup',this)">SUMO / TraCI Setup</div>
+    <div class="topbar-right">
+      <a href="https://sumo.dlr.de/docs/TraCI.html" target="_blank">TraCI docs</a>
+      <a href="https://sumo.dlr.de/" target="_blank">sumo.dlr.de</a>
+      <a href="https://github.com/the-anylogic-company/AnyLogic-Pypeline" target="_blank">Pypeline</a>
+    </div>
+  </div>
+
+  <!-- SIM PANEL -->
+  <div id="sim-panel" class="panel active">
+    <div id="canvas-wrap">
+      <canvas id="sim-canvas"></canvas>
+    </div>
+
+    <div id="sim-right">
+      <div class="sb-block">
+        <div class="sb-label">Signal state</div>
+        <div class="tl-grid">
+          <div class="tl-col">
+            <div class="tl-dir">N — S</div>
+            <div class="tl-box">
+              <div class="tl-dot r off" id="tl-ns-r"></div>
+              <div class="tl-dot y off" id="tl-ns-y"></div>
+              <div class="tl-dot g off" id="tl-ns-g"></div>
+            </div>
+          </div>
+          <div class="tl-col">
+            <div class="tl-dir">E — W</div>
+            <div class="tl-box">
+              <div class="tl-dot r off" id="tl-ew-r"></div>
+              <div class="tl-dot y off" id="tl-ew-y"></div>
+              <div class="tl-dot g off" id="tl-ew-g"></div>
+            </div>
+          </div>
+        </div>
+        <div class="phase-info">
+          <span class="phase-name" id="phase-name">NS Green</span>
+          <span class="phase-countdown" id="phase-cd">30</span>
+        </div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Queue depth</div>
+        <div class="queue-bar-wrap"><div class="queue-bar-label"><span>N</span><span id="qv-N">0</span></div><div class="queue-bar-track"><div class="queue-bar-fill" id="qb-N" style="width:0%"></div></div></div>
+        <div class="queue-bar-wrap"><div class="queue-bar-label"><span>S</span><span id="qv-S">0</span></div><div class="queue-bar-track"><div class="queue-bar-fill" id="qb-S" style="width:0%"></div></div></div>
+        <div class="queue-bar-wrap"><div class="queue-bar-label"><span>E</span><span id="qv-E">0</span></div><div class="queue-bar-track"><div class="queue-bar-fill" id="qb-E" style="width:0%"></div></div></div>
+        <div class="queue-bar-wrap"><div class="queue-bar-label"><span>W</span><span id="qv-W">0</span></div><div class="queue-bar-track"><div class="queue-bar-fill" id="qb-W" style="width:0%"></div></div></div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Metrics</div>
+        <div class="metric-row"><span class="metric-key">Avg wait</span><span class="metric-val" id="m-wait">0.0 s</span></div>
+        <div class="metric-row"><span class="metric-key">Throughput</span><span class="metric-val good" id="m-thru">0</span></div>
+        <div class="metric-row"><span class="metric-key">Sim time</span><span class="metric-val" id="m-time">0 s</span></div>
+        <div class="metric-row"><span class="metric-key">Vehicles</span><span class="metric-val" id="m-veh">0</span></div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Controls</div>
+        <div class="ctrl-row">
+          <button class="btn primary" id="btn-pp" onclick="togglePlay()">Play</button>
+          <button class="btn danger" onclick="resetSim()">Reset</button>
+        </div>
+        <div class="range-row">
+          <label>Speed</label>
+          <input type="range" min="1" max="10" value="3" id="sl-speed" oninput="simSpeed=+this.value;document.getElementById('v-speed').textContent=this.value+'x'">
+          <span class="range-val" id="v-speed">3x</span>
+        </div>
+        <div class="range-row">
+          <label>N/S flow</label>
+          <input type="range" min="1" max="10" value="5" id="sl-ns" oninput="document.getElementById('v-ns').textContent=this.value">
+          <span class="range-val" id="v-ns">5</span>
+        </div>
+        <div class="range-row">
+          <label>E/W flow</label>
+          <input type="range" min="1" max="10" value="3" id="sl-ew" oninput="document.getElementById('v-ew').textContent=this.value">
+          <span class="range-val" id="v-ew">3</span>
+        </div>
+      </div>
+
+      <div class="sb-block" style="flex:1">
+        <div class="sb-label">Event log</div>
+        <div id="log-area"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JUDGE PANEL -->
+  <div id="judge-panel" class="panel">
+    <div id="editor-col">
+      <div class="editor-header">
+        <span class="hdr-title">controller.py — traffic light controller</span>
+        <button class="hdr-btn" onclick="loadExample('fixed')">Fixed-time</button>
+        <button class="hdr-btn" onclick="loadExample('adaptive')">Adaptive</button>
+        <button class="hdr-btn" onclick="loadExample('demand')">Demand-based</button>
+      </div>
+      <div id="code-area">
+        <textarea id="code-input" spellcheck="false"># Traffic Light Controller
+# ─────────────────────────────────────────────────────────
+# Called every simulation tick by SUMO via TraCI.
+#
+# Arguments:
+#   queues       : dict  — {N, S, E, W}  vehicle counts waiting
+#   current_phase: str   — 'NS' or 'EW'
+#   phase_timer  : float — seconds elapsed in current phase
+#
+# Return values:
+#   'NS'     → keep / switch to N-S green
+#   'EW'     → keep / switch to E-W green
+#   'yellow' → trigger yellow transition (platform handles timing)
+# ─────────────────────────────────────────────────────────
+
+def control(queues, current_phase, phase_timer):
+    if current_phase == 'NS':
+        if phase_timer >= 30:
+            return 'yellow'
+    elif current_phase == 'EW':
+        if phase_timer >= 20:
+            return 'yellow'
+    return current_phase
+</textarea>
+      </div>
+      <div class="editor-footer">
+        <button class="btn primary" onclick="runJudge()" style="flex:none;padding:6px 20px" id="btn-judge">Run Judge (5 scenarios)</button>
+        <span style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-left:auto" id="judge-status">Not submitted</span>
+      </div>
+    </div>
+
+    <div id="judge-col">
+      <div class="score-hero">
+        <div class="score-num" id="j-score">—</div>
+        <div class="score-denom">/ 100</div>
+        <div class="score-sub" id="j-rank">submit to see ranking</div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Scenarios</div>
+        <div id="test-list">
+          <div class="test-item" data-idx="0"><span class="t-name">1. Low Traffic</span><div class="t-bar"><div class="t-bar-fill" style="width:0%"></div></div><span class="t-score">—</span><span class="badge badge-pending">—</span></div>
+          <div class="test-item" data-idx="1"><span class="t-name">2. Light Traffic</span><div class="t-bar"><div class="t-bar-fill" style="width:0%"></div></div><span class="t-score">—</span><span class="badge badge-pending">—</span></div>
+          <div class="test-item" data-idx="2"><span class="t-name">3. Balanced</span><div class="t-bar"><div class="t-bar-fill" style="width:0%"></div></div><span class="t-score">—</span><span class="badge badge-pending">—</span></div>
+          <div class="test-item" data-idx="3"><span class="t-name">4. Heavy Traffic</span><div class="t-bar"><div class="t-bar-fill" style="width:0%"></div></div><span class="t-score">—</span><span class="badge badge-pending">—</span></div>
+          <div class="test-item" data-idx="4"><span class="t-name">5. Rush Hour</span><div class="t-bar"><div class="t-bar-fill" style="width:0%"></div></div><span class="t-score">—</span><span class="badge badge-pending">—</span></div>
+        </div>
+      </div>
+
+      <div class="sb-block">
+        <div class="sb-label">Breakdown</div>
+        <div class="metric-row"><span class="metric-key">Avg delay</span><span class="metric-val" id="j-wait">—</span></div>
+        <div class="metric-row"><span class="metric-key">Throughput</span><span class="metric-val" id="j-thru">—</span></div>
+        <div class="metric-row"><span class="metric-key">Max queue</span><span class="metric-val" id="j-queue">—</span></div>
+        <div class="metric-row"><span class="metric-key">Engine</span><span class="metric-val" id="j-engine" style="color:var(--blue)">—</span></div>
+      </div>
+
+      <div class="sb-block" style="flex:1">
+        <div class="sb-label">Notes</div>
+        <div id="judge-notes" style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.8">Submit code to see evaluation notes.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LEADERBOARD PANEL -->
+  <div id="lb-panel" class="panel">
+    <div style="display:flex;gap:24px;flex-wrap:wrap">
+      <div style="flex:1;min-width:400px">
+        <div class="sb-label" style="margin-bottom:12px">Global rankings</div>
+        <table class="lb-table">
+          <thead>
+            <tr>
+              <th class="rank-col">#</th>
+              <th class="name-col">submission</th>
+              <th class="score-col">score</th>
+              <th class="wait-col">avg delay</th>
+              <th class="thru-col">throughput</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="lb-body">
+            <tr><td class="rank-col">1</td><td class="name-col">adaptive_v3.py</td><td class="score-col">94.2</td><td class="wait-col">6.1s</td><td class="thru-col">412</td><td><span class="badge badge-pass">top</span></td></tr>
+            <tr><td class="rank-col">2</td><td class="name-col">demand_queue_opt.py</td><td class="score-col">88.7</td><td class="wait-col">8.4s</td><td class="thru-col">389</td><td><span class="badge badge-pass">pass</span></td></tr>
+            <tr><td class="rank-col">3</td><td class="name-col">greedy_ns.py</td><td class="score-col">81.0</td><td class="wait-col">11.2s</td><td class="thru-col">361</td><td><span class="badge badge-partial">partial</span></td></tr>
+            <tr><td class="rank-col">4</td><td class="name-col">baseline_30_20.py</td><td class="score-col">67.3</td><td class="wait-col">16.8s</td><td class="thru-col">310</td><td><span class="badge badge-pending">—</span></td></tr>
+            <tr id="lb-you" class="you" style="display:none"><td class="rank-col" id="lb-you-rank">?</td><td class="name-col">your_solution.py</td><td class="score-col" id="lb-you-score">—</td><td class="wait-col" id="lb-you-wait">—</td><td class="thru-col" id="lb-you-thru">—</td><td><span class="badge badge-running" id="lb-you-badge">—</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="width:220px">
+        <div class="sb-label" style="margin-bottom:12px">Your stats</div>
+        <div class="metric-row"><span class="metric-key">Best score</span><span class="metric-val" id="lb-best">—</span></div>
+        <div class="metric-row"><span class="metric-key">Submissions</span><span class="metric-val" id="lb-nsubs">0</span></div>
+        <div class="metric-row"><span class="metric-key">Rank</span><span class="metric-val" id="lb-rank">—</span></div>
+        <div style="margin-top:20px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:4px">
+          <div class="sb-label" style="margin-bottom:8px">Hint</div>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.8">
+            Compare queue sums:<br>
+            if queues['N'] + queues['S']<br>
+            &gt; queues['E'] + queues['W']:<br>
+            &nbsp;&nbsp;bias toward NS phase
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SUMO SETUP PANEL -->
+  <div id="setup-panel" class="panel">
+    <div id="setup-nav">
+      <div class="setup-nav-item active" onclick="showSetupPage('overview',this)">Overview</div>
+      <div class="setup-nav-item" onclick="showSetupPage('install',this)">Installation</div>
+      <div class="setup-nav-item" onclick="showSetupPage('model',this)">Network model</div>
+      <div class="setup-nav-item" onclick="showSetupPage('traci',this)">TraCI API</div>
+      <div class="setup-nav-item" onclick="showSetupPage('backend',this)">Backend server</div>
+      <div class="setup-nav-item" onclick="showSetupPage('interface',this)">Controller API</div>
+      <div class="setup-nav-item" onclick="showSetupPage('metrics',this)">Metrics & scoring</div>
+    </div>
+    <div id="setup-content"></div>
+  </div>
+
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════
+//  TAB SWITCHING
+// ════════════════════════════════════════════════════════
+function switchTab(name, el) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(name + '-panel').classList.add('active');
+  el.classList.add('active');
+  if(name === 'sim') resizeCanvas();
+}
+
+// ════════════════════════════════════════════════════════
+//  CANVAS RESIZE — fills available space
+// ════════════════════════════════════════════════════════
+const canvas = document.getElementById('sim-canvas');
+const ctx = canvas.getContext('2d');
+
+// Internal logical resolution
+const W = 680, H = 680, CX = W/2, CY = H/2;
+const ROAD = 56, LANE = 26;
+
+canvas.width  = W;
+canvas.height = H;
+
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  if(!wrap) return;
+  const size = Math.min(wrap.clientWidth - 32, wrap.clientHeight - 32, 820);
+  canvas.style.width  = size + 'px';
+  canvas.style.height = size + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ════════════════════════════════════════════════════════
+//  SIMULATION ENGINE
+// ════════════════════════════════════════════════════════
+let running = false, simTime = 0, simSpeed = 3;
+let phase = 'NS', phaseTimer = 0, inYellow = false, yellowTimer = 0;
+let vehicles = [], vid = 0, throughput = 0, totalWait = 0, waitCount = 0;
+let lastTs = null, spawnAcc = {N:0,S:0,E:0,W:0};
+let userScore = null, numSubmits = 0;
+const DIRS = ['N','S','E','W'];
+const PHASE_DIRS = {NS:['N','S'], EW:['E','W']};
+const YELLOW_DUR = 3;
+const NS_GREEN = 30, EW_GREEN = 20;
+
+const CAR_COLORS = ['#5c7a9a','#7a5c9a','#9a7a5c','#5c9a7a','#9a5c5c','#5c8a7a','#8a7a5c'];
+
+function stopLine(dir) {
+  if(dir==='N') return {axis:'y', val:CY+ROAD+16};
+  if(dir==='S') return {axis:'y', val:CY-ROAD-16};
+  if(dir==='E') return {axis:'x', val:CX-ROAD-16};
+  if(dir==='W') return {axis:'x', val:CX+ROAD+16};
+}
+
+function canGo(dir) {
+  if(inYellow) return false;
+  return PHASE_DIRS[phase].includes(dir);
+}
+
+function spawnVehicle(dir) {
+  const spd = (1.0 + Math.random()*0.5) * 1.3;
+  let x, y, vx, vy;
+  if(dir==='N') { x=CX+LANE/2; y=H+28; vx=0; vy=-spd; }
+  else if(dir==='S') { x=CX-LANE/2; y=-28; vx=0; vy=spd; }
+  else if(dir==='E') { x=-28; y=CY-LANE/2; vx=spd; vy=0; }
+  else { x=W+28; y=CY+LANE/2; vx=-spd; vy=0; }
+  vehicles.push({id:vid++, dir, x, y, vx, vy, state:'moving', waitTime:0, color:CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)]});
+}
+
+function updateVehicles(dt) {
+  for(let v of vehicles) {
+    const sl = stopLine(v.dir);
+    const atStop = sl.axis==='y'
+      ? (v.dir==='N' ? v.y > sl.val+2  && v.y < sl.val+65  : v.y < sl.val-2  && v.y > sl.val-65)
+      : (v.dir==='E' ? v.x < sl.val-2  && v.x > sl.val-65  : v.x > sl.val+2  && v.x < sl.val+65);
+
+    let carAhead = false;
+    for(let u of vehicles) {
+      if(u.id===v.id || u.dir!==v.dir) continue;
+      const gap = v.dir==='N'? v.y-u.y : v.dir==='S'? u.y-v.y : v.dir==='E'? u.x-v.x : v.x-u.x;
+      if(gap > 0 && gap < 34) { carAhead = true; break; }
+    }
+
+    if(v.state === 'moving') {
+      if((!canGo(v.dir) && atStop) || (carAhead && atStop)) {
+        v.state = 'queued';
+      } else if(!carAhead) {
+        v.x += v.vx * dt * simSpeed * 60;
+        v.y += v.vy * dt * simSpeed * 60;
+      }
+    } else {
+      if(canGo(v.dir) && !carAhead) {
+        v.state = 'moving';
+        v.x += v.vx * dt * simSpeed * 60;
+        v.y += v.vy * dt * simSpeed * 60;
+      } else {
+        v.waitTime += dt * simSpeed;
+      }
+    }
+  }
+  const before = vehicles.length;
+  vehicles = vehicles.filter(v => v.x > -60 && v.x < W+60 && v.y > -60 && v.y < H+60);
+  throughput += before - vehicles.length;
+  for(let v of vehicles) if(v.waitTime > 0) { totalWait += v.waitTime * dt * simSpeed; waitCount++; }
+}
+
+function spawnStep(dt) {
+  const dns = +document.getElementById('sl-ns').value;
+  const dew = +document.getElementById('sl-ew').value;
+  const rates = {N:dns*0.018, S:dns*0.015, E:dew*0.016, W:dew*0.013};
+  for(let dir of DIRS) {
+    spawnAcc[dir] += rates[dir] * dt * simSpeed;
+    while(spawnAcc[dir] >= 1) { spawnAcc[dir]--; spawnVehicle(dir); }
+  }
+}
+
+function stepPhase(dt) {
+  phaseTimer += dt * simSpeed;
+  if(inYellow) {
+    yellowTimer += dt * simSpeed;
+    if(yellowTimer >= YELLOW_DUR) {
+      inYellow = false; yellowTimer = 0; phaseTimer = 0;
+      phase = phase==='NS' ? 'EW' : 'NS';
+      addLog('Phase switched to ' + phase, 'info');
+    }
+    return;
+  }
+  const dur = phase==='NS' ? NS_GREEN : EW_GREEN;
+  if(phaseTimer >= dur) { inYellow = true; yellowTimer = 0; }
+}
+
+function queueCount(dir) { return vehicles.filter(v=>v.dir===dir&&v.state==='queued').length; }
+function getQueues() { return {N:queueCount('N'),S:queueCount('S'),E:queueCount('E'),W:queueCount('W')}; }
+
+// ── DRAW ──
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  drawRoad();
+  drawLights();
+  drawVehicles_sim();
+}
+
+function drawRoad() {
+  ctx.fillStyle = '#1a1f1a'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(CX-ROAD, 0, ROAD*2, H);
+  ctx.fillRect(0, CY-ROAD, W, ROAD*2);
+
+  const q = getQueues();
+  function qTint(x,y,w,h,count) {
+    if(count < 2) return;
+    const alpha = Math.min(0.35, count / 12);
+    ctx.fillStyle = `rgba(255,69,69,${alpha})`;
+    ctx.fillRect(x,y,w,h);
+  }
+  qTint(CX,       CY+ROAD, ROAD,       H-CY-ROAD, q.N);
+  qTint(CX-ROAD,  0,       ROAD,       CY-ROAD,   q.S);
+  qTint(0,        CY-ROAD, CX-ROAD,   ROAD,       q.E);
+  qTint(CX+ROAD,  CY,      W-CX-ROAD, ROAD,       q.W);
+
+  ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.setLineDash([10,12]);
+  ctx.beginPath(); ctx.moveTo(CX,0);       ctx.lineTo(CX,CY-ROAD);   ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX,CY+ROAD); ctx.lineTo(CX,H);         ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,CY);       ctx.lineTo(CX-ROAD,CY);   ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+ROAD,CY); ctx.lineTo(W,CY);         ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(CX,     CY+ROAD+2); ctx.lineTo(CX+ROAD, CY+ROAD+2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX-ROAD,CY-ROAD-2); ctx.lineTo(CX,      CY-ROAD-2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX-ROAD-2,CY-ROAD); ctx.lineTo(CX-ROAD-2,CY);        ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+ROAD+2,CY);       ctx.lineTo(CX+ROAD+2,CY+ROAD); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.font = '12px IBM Plex Mono, monospace'; ctx.textAlign='center';
+  ctx.fillText('N', CX+LANE/2, 18);
+  ctx.fillText('S', CX-LANE/2, H-8);
+  ctx.fillText('W', 18, CY+LANE/2+14);
+  ctx.fillText('E', W-18, CY-LANE/2-4);
+}
+
+function drawLights() {
+  drawSignalBox(CX+ROAD+10, CY+ROAD+10, true);
+  drawSignalBox(CX-ROAD-10, CY-ROAD-10, true);
+  drawSignalBox(CX-ROAD-10, CY+ROAD+10, false);
+  drawSignalBox(CX+ROAD+10, CY-ROAD-10, false);
+}
+
+function drawSignalBox(x, y, isNS) {
+  const green  = isNS ? (phase==='NS'&&!inYellow) : (phase==='EW'&&!inYellow);
+  const yellow = inYellow;
+  const red    = !green && !yellow;
+  const s = 6;
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.roundRect(x-s, y-s*4, s*2, s*9, 2); ctx.fill();
+  ctx.fillStyle = (red||yellow) ? '#ff4545' : '#ff454520';
+  ctx.beginPath(); ctx.arc(x, y-s*2.5, s*.75, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = yellow ? '#ffaa00' : '#ffaa0020';
+  ctx.beginPath(); ctx.arc(x, y, s*.75, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = green ? '#3ddc84' : '#3ddc8420';
+  ctx.beginPath(); ctx.arc(x, y+s*2.5, s*.75, 0, Math.PI*2); ctx.fill();
+  if(green||yellow||red) { // glow
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = green ? '#3ddc84' : yellow ? '#ffaa00' : '#ff4545';
+    const bulb = green ? y+s*2.5 : yellow ? y : y-s*2.5;
+    ctx.beginPath(); ctx.arc(x, bulb, s*.75, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+function drawVehicles_sim() {
+  for(let v of vehicles) {
+    ctx.save(); ctx.translate(v.x, v.y);
+    if(v.dir==='N')      ctx.rotate(Math.PI);
+    else if(v.dir==='S') ctx.rotate(0);
+    else if(v.dir==='E') ctx.rotate(Math.PI/2);
+    else                 ctx.rotate(-Math.PI/2);
+    const bw=9, bh=16;
+    ctx.fillStyle = v.color;
+    ctx.beginPath(); ctx.roundRect(-bw/2,-bh/2,bw,bh,2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,230,255,0.55)';
+    ctx.fillRect(-bw/2+1,-bh/2+2,bw-2,4);
+    ctx.restore();
+  }
+}
+
+// ── UI UPDATES ──
+function updateSignalUI() {
+  const s = (id, on) => {
+    const el = document.getElementById(id);
+    const cls = id.split('-')[2]; // r, y, or g
+    el.className = 'tl-dot ' + cls + (on ? ' on' : ' off');
+  };
+  if(inYellow) {
+    s('tl-ns-r',true); s('tl-ns-y',true); s('tl-ns-g',false);
+    s('tl-ew-r',true); s('tl-ew-y',true); s('tl-ew-g',false);
+    document.getElementById('phase-name').textContent = 'Yellow';
+    document.getElementById('phase-name').style.color = 'var(--amber)';
+  } else if(phase==='NS') {
+    s('tl-ns-r',false); s('tl-ns-y',false); s('tl-ns-g',true);
+    s('tl-ew-r',true);  s('tl-ew-y',false); s('tl-ew-g',false);
+    document.getElementById('phase-name').textContent = 'NS Green';
+    document.getElementById('phase-name').style.color = 'var(--green)';
+  } else {
+    s('tl-ns-r',true);  s('tl-ns-y',false); s('tl-ns-g',false);
+    s('tl-ew-r',false); s('tl-ew-y',false); s('tl-ew-g',true);
+    document.getElementById('phase-name').textContent = 'EW Green';
+    document.getElementById('phase-name').style.color = 'var(--green)';
+  }
+  const remaining = inYellow
+    ? Math.max(0, YELLOW_DUR - yellowTimer)
+    : Math.max(0, (phase==='NS'?NS_GREEN:EW_GREEN) - phaseTimer);
+  document.getElementById('phase-cd').textContent = Math.ceil(remaining)+'s';
+}
+
+function updateMetricsUI() {
+  const q = getQueues();
+  const maxQ = 15;
+  for(let dir of DIRS) {
+    document.getElementById('qv-'+dir).textContent = q[dir];
+    const pct  = Math.min(100, q[dir]/maxQ*100);
+    const fill = document.getElementById('qb-'+dir);
+    fill.style.width      = pct+'%';
+    fill.style.background = q[dir]>=8?'var(--red)':q[dir]>=4?'var(--amber)':'var(--green)';
+  }
+  const aw = waitCount>0 ? (totalWait/waitCount) : 0;
+  document.getElementById('m-wait').textContent  = aw.toFixed(1)+' s';
+  document.getElementById('m-wait').className    = 'metric-val'+(aw>20?' bad':aw>10?' warn':' good');
+  document.getElementById('m-thru').textContent  = throughput;
+  document.getElementById('m-time').textContent  = Math.floor(simTime)+'s';
+  document.getElementById('m-veh').textContent   = vehicles.length;
+}
+
+// ── LOOP ──
+function loop(ts) {
+  if(!lastTs) lastTs = ts;
+  const dt = Math.min((ts-lastTs)/1000, 0.05);
+  lastTs = ts;
+  if(running) {
+    simTime += dt * simSpeed;
+    spawnStep(dt);
+    updateVehicles(dt);
+    stepPhase(dt);
+    updateMetricsUI();
+  }
+  draw();
+  updateSignalUI();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function togglePlay() {
+  running = !running;
+  const btn = document.getElementById('btn-pp');
+  btn.textContent = running ? 'Pause' : 'Play';
+  btn.className   = running ? 'btn danger' : 'btn primary';
+  if(running) addLog('Simulation started', 'ok');
+}
+
+function resetSim() {
+  running = false;
+  vehicles = []; vid=0; throughput=0; totalWait=0; waitCount=0;
+  phase='NS'; phaseTimer=0; yellowTimer=0; inYellow=false; simTime=0;
+  spawnAcc={N:0,S:0,E:0,W:0};
+  document.getElementById('btn-pp').textContent='Play';
+  document.getElementById('btn-pp').className='btn primary';
+  updateMetricsUI(); updateSignalUI();
+  addLog('Reset', 'warn');
+}
+
+// ── LOG ──
+let logLines = [];
+function addLog(msg, type='') {
+  const t = Math.floor(simTime);
+  logLines.push(`<div class="lg-${type}">[${t}s] ${msg}</div>`);
+  if(logLines.length > 40) logLines.shift();
+  const el = document.getElementById('log-area');
+  el.innerHTML = logLines.join('');
+  el.scrollTop = el.scrollHeight;
+}
+addLog('Platform ready', 'ok');
+addLog('SUMO / TraCI backend — see Setup tab', 'info');
+
+// ════════════════════════════════════════════════════════
+//  JUDGE ENGINE — tries SUMO backend first, falls back to local sim
+// ════════════════════════════════════════════════════════
+const BACKEND_URL = 'http://localhost:8000/evaluate';
+
+// Local fallback scenarios (mirrors evaluator.py levels 1-5)
+const LOCAL_SCENARIOS = [
+  {name:'1. Low Traffic',   nsD:1,  ewD:1,  dur:120},
+  {name:'2. Light Traffic', nsD:3,  ewD:3,  dur:120},
+  {name:'3. Balanced',      nsD:5,  ewD:5,  dur:150},
+  {name:'4. Heavy Traffic', nsD:8,  ewD:8,  dur:150},
+  {name:'5. Rush Hour',     nsD:10, ewD:10, dur:150},
+];
+const LOCAL_BASELINES = [
+  {avgWait:5,  thru:99, maxQ:3},
+  {avgWait:14, thru:96, maxQ:7},
+  {avgWait:26, thru:90, maxQ:11},
+  {avgWait:28, thru:85, maxQ:14},
+  {avgWait:35, thru:72, maxQ:17},
+];
+
+function parseController(code) {
+  let nsTime=30, ewTime=20;
+  const nsM = code.match(/current_phase\s*==\s*['"]NS['"]\s*[\s\S]*?phase_timer\s*>=\s*(\d+)/);
+  const ewM = code.match(/current_phase\s*==\s*['"]EW['"]\s*[\s\S]*?phase_timer\s*>=\s*(\d+)/);
+  if(nsM) nsTime=+nsM[1];
+  if(ewM) ewTime=+ewM[1];
+  const isAdaptive = code.includes('queues') && /['"][NSEW]['"]\]/.test(code);
+  const isWeighted = (code.includes('+')||code.includes('sum')||code.includes('total')) && isAdaptive;
+  const minGreenMatch = code.match(/phase_timer\s*[<>]=?\s*(\d+)/g);
+  const minGreen = minGreenMatch ? Math.min(...minGreenMatch.map(m=>+m.replace(/[^0-9]/g,''))) : 0;
+  return {nsTime, ewTime, isAdaptive, isWeighted, minGreen};
+}
+
+function runLocalScenario(ctrl, scenario) {
+  let v=[], ph='NS', pTimer=0, yTimer=0, inY=false;
+  let spawn={N:0,S:0,E:0,W:0};
+  let thru=0, totalW=0, waitC=0, maxQ=0;
+  const DT=0.5;
+  const nsG=ctrl.nsTime, ewG=ctrl.ewTime;
+  const adaptBias  = ctrl.isAdaptive ? 0.88 : 1.0;
+  const weightBias = ctrl.isWeighted ? 0.93 : 1.0;
+
+  for(let t=0; t<scenario.dur; t+=DT) {
+    const nsR=scenario.nsD*0.009, ewR=scenario.ewD*0.009;
+    spawn.N+=nsR*DT; spawn.S+=nsR*DT*0.9; spawn.E+=ewR*DT; spawn.W+=ewR*DT*0.85;
+    for(let d of DIRS) while(spawn[d]>=1){spawn[d]--;v.push({dir:d,wait:0,state:'q'});}
+
+    pTimer+=DT;
+    if(inY){ yTimer+=DT; if(yTimer>=3){inY=false;yTimer=0;pTimer=0;ph=ph==='NS'?'EW':'NS';} }
+    else {
+      const nsTotal=v.filter(c=>['N','S'].includes(c.dir)&&c.state==='q').length;
+      const ewTotal=v.filter(c=>['E','W'].includes(c.dir)&&c.state==='q').length;
+      let dur;
+      if(ctrl.isAdaptive){
+        if(ph==='NS'){
+          dur=nsG+(ctrl.isWeighted?Math.min(10,nsTotal*1.5):0);
+          if(ewTotal>8&&pTimer>(ctrl.minGreen||15)){inY=true;yTimer=0;continue;}
+        } else {
+          dur=ewG+(ctrl.isWeighted?Math.min(10,ewTotal*1.5):0);
+          if(nsTotal>8&&pTimer>(ctrl.minGreen||12)){inY=true;yTimer=0;continue;}
+        }
+      } else { dur=ph==='NS'?nsG:ewG; }
+      if(pTimer>=dur){inY=true;yTimer=0;}
+    }
+    const greenDirs=inY?[]:PHASE_DIRS[ph];
+    for(let car of v){ if(!inY&&greenDirs.includes(car.dir))car.state='moving'; else{car.state='q';car.wait+=DT;} }
+    const qs=DIRS.map(d=>v.filter(c=>c.dir===d&&c.state==='q').length);
+    maxQ=Math.max(maxQ,...qs);
+    v=v.filter(c=>{if(c.state==='moving'&&Math.random()<0.38){thru++;totalW+=c.wait;waitC++;return false;}return true;});
+  }
+  for(let c of v){totalW+=c.wait;waitC++;}
+  const avgWait=waitC>0?totalW/waitC:0;
+  return {avgWait, thru, maxQ, adaptBias, weightBias};
+}
+
+function scoreLocalScenario(res, baseline) {
+  const waitScore = Math.max(0,1-(res.avgWait-baseline.avgWait*0.45)/baseline.avgWait);
+  const thruScore = Math.min(1,res.thru/baseline.thru);
+  const qScore    = Math.max(0,1-(res.maxQ-baseline.maxQ*0.45)/baseline.maxQ);
+  const raw       = (waitScore*40+thruScore*40+qScore*20)*100;
+  return Math.min(100,raw*res.adaptBias*res.weightBias);
+}
+
+function applyScoreToRow(i, sc) {
+  const rows = document.querySelectorAll('#test-list .test-item');
+  const row  = rows[i];
+  if(!row) return;
+  row.querySelector('.t-score').textContent    = sc.toFixed(1);
+  row.querySelector('.t-bar-fill').style.width = sc+'%';
+  const badge = row.querySelector('.badge');
+  if(sc>=75){badge.className='badge badge-pass';badge.textContent='pass';row.querySelector('.t-bar-fill').style.background='var(--green)';}
+  else if(sc>=50){badge.className='badge badge-partial';badge.textContent='partial';row.querySelector('.t-bar-fill').style.background='var(--amber)';}
+  else{badge.className='badge badge-fail';badge.textContent='fail';row.querySelector('.t-bar-fill').style.background='var(--red)';}
+}
+
+function applyFinalScore(avg, wait, thru, queue, isBackend) {
+  numSubmits++;
+  userScore = avg;
+  const scoreEl = document.getElementById('j-score');
+  scoreEl.textContent = avg.toFixed(1);
+  scoreEl.style.color = avg>=75?'var(--green)':avg>=50?'var(--amber)':'var(--red)';
+
+  const referenceScores=[94.2,88.7,81.0,67.3];
+  const rank = referenceScores.filter(s=>s>avg).length+1;
+  document.getElementById('j-rank').textContent   = `Rank #${rank} of ${referenceScores.length+1}`;
+  document.getElementById('j-wait').textContent   = (wait).toFixed?wait.toFixed(1)+' s':wait;
+  document.getElementById('j-thru').textContent   = Math.round(thru);
+  document.getElementById('j-queue').textContent  = Math.round(queue);
+  document.getElementById('j-engine').textContent = isBackend ? 'SUMO / TraCI ✓' : 'Local (offline)';
+  document.getElementById('judge-status').textContent = `Score: ${avg.toFixed(1)} — #${numSubmits}`;
+
+  document.getElementById('lb-you').style.display='';
+  document.getElementById('lb-you-rank').textContent  = '#'+rank;
+  document.getElementById('lb-you-score').textContent = avg.toFixed(1);
+  document.getElementById('lb-you-wait').textContent  = typeof wait==='number' ? wait.toFixed(1)+'s' : wait;
+  document.getElementById('lb-you-thru').textContent  = Math.round(thru);
+  document.getElementById('lb-best').textContent      = avg.toFixed(1);
+  document.getElementById('lb-nsubs').textContent     = numSubmits;
+  document.getElementById('lb-rank').textContent      = '#'+rank;
+  const lb_badge = document.getElementById('lb-you-badge');
+  lb_badge.textContent = avg>=75?'pass':avg>=50?'partial':'fail';
+  lb_badge.className   = avg>=75?'badge badge-pass':avg>=50?'badge badge-partial':'badge badge-fail';
+}
+
+let judgeRunning = false;
+
+async function runJudge() {
+  if(judgeRunning) return;
+  judgeRunning = true;
+  const btnJudge = document.getElementById('btn-judge');
+  btnJudge.textContent = 'Running...';
+  btnJudge.disabled    = true;
+  document.getElementById('judge-status').textContent = 'Connecting to backend...';
+  document.getElementById('j-score').textContent = '...';
+  document.getElementById('j-engine').textContent = '...';
+
+  // Reset test rows
+  document.querySelectorAll('#test-list .test-item').forEach(row=>{
+    row.querySelector('.t-score').textContent    = '—';
+    row.querySelector('.t-bar-fill').style.width = '0%';
+    row.querySelector('.badge').className        = 'badge badge-running';
+    row.querySelector('.badge').textContent      = 'running';
+  });
+
+  const code = document.getElementById('code-input').value;
+
+  // ── Try SUMO backend ──────────────────────────────────
+  try {
+    document.getElementById('judge-status').textContent = 'Running SUMO simulations...';
+    const res = await fetch(BACKEND_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({code}),
+      signal: AbortSignal.timeout(300000), // 5 min
+    });
+    if(res.ok) {
+      const data = await res.json();
+      if(!data.error) {
+        // handle both response formats from main.py
+        if('final_score' in data && 'details' in data) {
+          // New format: {final_score, details:[{level, score, total_delay, throughput, max_queue_length, level_label}]}
+          const details = data.details || [];
+          let sumWait=0, sumThru=0, sumQ=0;
+          details.forEach((d,i)=>{
+            const sc = d.score ?? 0;
+            applyScoreToRow(i, sc);
+            sumWait += d.total_delay ?? 0;
+            sumThru += d.throughput  ?? 0;
+            sumQ    += d.max_queue_length ?? 0;
+          });
+          const n = details.length || 1;
+          applyFinalScore(data.final_score, sumWait/n, sumThru/n, sumQ/n, true);
+        } else if('overall_score' in data && 'scenarios' in data) {
+          // Old format
+          const scenarios = data.scenarios || [];
+          let sumWait=0, sumThru=0, sumQ=0;
+          scenarios.forEach((s,i)=>{
+            applyScoreToRow(i, s.score ?? 0);
+            sumWait += s.avg_wait ?? 0;
+            sumThru += s.throughput ?? 0;
+            sumQ    += s.max_queue  ?? 0;
+          });
+          const n = scenarios.length || 1;
+          applyFinalScore(data.overall_score, sumWait/n, sumThru/n, sumQ/n, true);
+        } else if('score' in data) {
+          // Single level fallback
+          applyScoreToRow(0, data.score);
+          applyFinalScore(data.score, data.total_delay??0, data.throughput??0, data.max_queue_length??0, true);
+        }
+        document.getElementById('judge-notes').textContent =
+          'Evaluated via SUMO / TraCI. Results reflect real traffic physics.';
+        judgeRunning = false;
+        btnJudge.textContent = 'Run Judge (5 scenarios)';
+        btnJudge.disabled    = false;
+        return;
+      }
+    }
+  } catch(e) {
+    // Backend not available — fall through to local
+    addLog('Backend offline, using local simulation', 'warn');
+    document.getElementById('judge-status').textContent = 'Backend offline — local sim...';
+  }
+
+  // ── Local fallback ────────────────────────────────────
+  const ctrl = parseController(code);
+  let totalScore=0, sumWait=0, sumThru=0, sumQ=0;
+
+  for(let i=0; i<LOCAL_SCENARIOS.length; i++) {
+    await new Promise(r=>setTimeout(r,300));
+    const res = runLocalScenario(ctrl, LOCAL_SCENARIOS[i]);
+    const sc  = scoreLocalScenario(res, LOCAL_BASELINES[i]);
+    totalScore += sc;
+    sumWait += res.avgWait; sumThru += res.thru; sumQ += res.maxQ;
+    applyScoreToRow(i, sc);
+  }
+
+  const avg = totalScore / LOCAL_SCENARIOS.length;
+  const ctrl_strat = ctrl.isWeighted?'Weighted adaptive':ctrl.isAdaptive?'Adaptive':'Fixed-time';
+  let notes = ctrl.isAdaptive
+    ? 'Adaptive controller detected. Bonus applied for queue data.\n'
+    : 'Fixed-time controller. Tip: use queue lengths to adapt timing.\n';
+  if(!ctrl.isWeighted && ctrl.isAdaptive) notes += 'Try weighting N+S vs E+W sums.\n';
+  if(avg>=75) notes+='Strong result! Start backend for SUMO scores.';
+  else if(avg>=50) notes+='Decent. Try running with the SUMO backend for real results.';
+  else notes+='Review phase switch logic. Start the Python backend for accurate scoring.';
+  document.getElementById('judge-notes').textContent = notes;
+
+  applyFinalScore(avg, sumWait/5, sumThru/5, sumQ/5, false);
+  judgeRunning = false;
+  btnJudge.textContent = 'Run Judge (5 scenarios)';
+  btnJudge.disabled    = false;
+}
+
+const EXAMPLES = {
+  fixed: `# Fixed-time controller (baseline)
+def control(queues, current_phase, phase_timer):
+    if current_phase == 'NS':
+        if phase_timer >= 30:
+            return 'yellow'
+    elif current_phase == 'EW':
+        if phase_timer >= 20:
+            return 'yellow'
+    return current_phase`,
+
+  adaptive: `# Adaptive controller
+def control(queues, current_phase, phase_timer):
+    ns_total = queues['N'] + queues['S']
+    ew_total = queues['E'] + queues['W']
+
+    if current_phase == 'NS':
+        green_time = 25 + min(15, ns_total * 2)
+        if ew_total > 8 and phase_timer > 20:
+            return 'yellow'
+        if phase_timer >= green_time:
+            return 'yellow'
+    else:
+        green_time = 18 + min(15, ew_total * 2)
+        if ns_total > 8 and phase_timer > 15:
+            return 'yellow'
+        if phase_timer >= green_time:
+            return 'yellow'
+    return current_phase`,
+
+  demand: `# Demand-based controller
+def control(queues, current_phase, phase_timer):
+    ns = queues['N'] + queues['S']
+    ew = queues['E'] + queues['W']
+
+    if phase_timer < 12:
+        return current_phase
+
+    if current_phase == 'NS':
+        if ew > ns * 1.8 and phase_timer > 15:
+            return 'yellow'
+        if phase_timer >= 35:
+            return 'yellow'
+    else:
+        if ns > ew * 1.8 and phase_timer > 12:
+            return 'yellow'
+        if phase_timer >= 28:
+            return 'yellow'
+    return current_phase`
+};
+
+function loadExample(type) {
+  document.getElementById('code-input').value = EXAMPLES[type];
+}
+
+// ════════════════════════════════════════════════════════
+//  SETUP DOCS
+// ════════════════════════════════════════════════════════
+const SETUP_PAGES = {
+  overview: `
+<div class="doc-h1">Traffic Judge — Platform Overview</div>
+<div class="doc-p" style="color:var(--text2);margin-top:4px;margin-bottom:20px;font-family:var(--mono);font-size:11px">SUMO / TraCI architecture reference</div>
+<div class="doc-h2">What this platform does</div>
+<div class="doc-p">Contestants write a Python <code style="color:var(--accent)">control()</code> function that controls a 4-way traffic light. The backend evaluates it by running a real <strong style="color:var(--text0)">SUMO</strong> simulation via <strong style="color:var(--text0)">TraCI</strong> across 5 traffic density levels and scores on delay, throughput, and queue depth.</div>
+<div class="doc-h2">System components</div>
+<div class="doc-p">
+  <strong style="color:var(--text0)">SUMO network</strong> — 4-way intersection built with netconvert. 2 lanes per approach, ±500 m arms from junction C.<br><br>
+  <strong style="color:var(--text0)">TraCI bridge</strong> — evaluator.py steps SUMO each tick, calls the contestant function, applies the signal decision via setRedYellowGreenState.<br><br>
+  <strong style="color:var(--text0)">Backend server</strong> (FastAPI) — receives code submissions, sandboxes them, runs SUMO, collects metrics, scores.<br><br>
+  <strong style="color:var(--text0)">This frontend</strong> — live canvas simulation + code editor + judge UI. Works offline (local sim) or with the backend (real SUMO).
+</div>`,
+
+  install: `
+<div class="doc-h1">Installation</div>
+<div class="doc-h2">1. Install SUMO</div>
+<div class="doc-p">Download from <a class="doc-link" href="https://sumo.dlr.de/docs/Downloads.php" target="_blank">sumo.dlr.de/docs/Downloads.php</a>. Make sure <code>sumo</code> and <code>netconvert</code> are in PATH.</div>
+<div class="doc-code">sumo --version
+netconvert --version</div>
+<div class="doc-h2">2. Install Python dependencies</div>
+<div class="doc-code">pip install fastapi uvicorn traci sumolib</div>
+<div class="doc-h2">3. Run backend</div>
+<div class="doc-code">cd backend
+python main.py</div>
+<div class="doc-note">Backend runs on http://localhost:8000. The frontend auto-detects it and uses SUMO when available.</div>`,
+
+  model: `
+<div class="doc-h1">SUMO Network Model</div>
+<div class="doc-h2">Node layout</div>
+<div class="doc-code">Junction C: x=0,   y=0      (traffic_light)
+Node N:     x=0,   y=-500   (priority)
+Node S:     x=0,   y=500    (priority)
+Node E:     x=500, y=0      (priority)
+Node W:     x=-500,y=0      (priority)</div>
+<div class="doc-h2">Edges</div>
+<div class="doc-code">N_to_C, C_to_N  — 2 lanes, speed 60 km/h
+S_to_C, C_to_S  — 2 lanes, speed 60 km/h
+E_to_C, C_to_E  — 2 lanes, speed 60 km/h
+W_to_C, C_to_W  — 2 lanes, speed 60 km/h</div>
+<div class="doc-h2">Vehicle types</div>
+<div class="doc-code">car: length=5m, maxSpeed=60km/h, accel=2.0, decel=4.5
+bus: length=12m, maxSpeed=40km/h, accel=1.2, decel=3.0</div>`,
+
+  traci: `
+<div class="doc-h1">TraCI API Used</div>
+<div class="doc-h2">Start simulation</div>
+<div class="doc-code">traci.start(["sumo", "-c", "sumo.sumocfg", "--no-step-log", "true"], port=port, label=label)
+conn = traci.getConnection(label)</div>
+<div class="doc-h2">Step simulation</div>
+<div class="doc-code">conn.simulationStep()  # advance 1 second</div>
+<div class="doc-h2">Set traffic light state</div>
+<div class="doc-code"># NS green: "GGGGrrrr..." (first half G, second half r)
+conn.trafficlight.setRedYellowGreenState("C", state_string)
+# Yellow: "yyyy..." all y</div>
+<div class="doc-h2">Read queue length</div>
+<div class="doc-code">count = conn.edge.getLastStepHaltingNumber("N_to_C")</div>
+<div class="doc-h2">Read vehicle positions (for replay)</div>
+<div class="doc-code">for vid in conn.vehicle.getIDList():
+    pos = conn.vehicle.getPosition(vid)   # (x, y) in net CRS
+    ang = conn.vehicle.getAngle(vid)       # degrees, 0=North clockwise</div>`,
+
+  backend: `
+<div class="doc-h1">Backend Server</div>
+<div class="doc-h2">Endpoint</div>
+<div class="doc-code">POST http://localhost:8000/evaluate
+Content-Type: application/json
+{ "code": "def control(queues, current_phase, phase_timer):\\n    ..." }
+
+Response:
+{
+  "final_score": 84.2,
+  "details": [
+    { "level": 1, "level_label": "Low Traffic", "score": 91.0,
+      "total_delay": 120.5, "throughput": 380, "max_queue_length": 4,
+      "status": "OK", "replay_data": [...] },
+    ...
+  ]
+}</div>
+<div class="doc-h2">Evaluation flow</div>
+<div class="doc-code">for level in [1, 2, 3, 4, 5]:
+    1. Generate SUMO network files (netconvert)
+    2. Generate route file with spawn_rate for that level
+    3. Start SUMO via TraCI
+    4. Launch contestant code in subprocess (sandboxed)
+    5. For each tick 1..3600:
+       - Step SUMO
+       - Read queues from edge halting numbers
+       - Send {tick, queues, phase, phase_timer} via stdin
+       - Read response {action} from stdout
+       - Apply phase change if action == "CHUYEN_PHA"
+    6. Collect metrics, compute score</div>`,
+
+  interface: `
+<div class="doc-h1">Controller Interface</div>
+<div class="doc-h2">Your solution.py template</div>
+<div class="doc-code">import sys, json
+
+def control(queues, current_phase, phase_timer):
+    # Your logic here
+    if current_phase == 'NS' and phase_timer >= 30:
+        return 'yellow'
+    if current_phase == 'EW' and phase_timer >= 20:
+        return 'yellow'
+    return current_phase
+
+# ── DO NOT EDIT BELOW ──
+for line in sys.stdin:
+    d = json.loads(line)
+    queues        = d['queues']
+    current_phase = d['phase']
+    phase_timer   = d['phase_timer']
+    result = control(queues, current_phase, phase_timer)
+    action = 'CHUYEN_PHA' if result == 'yellow' else 'GIU_NGUYEN'
+    sys.stdout.write(json.dumps({'action': action}) + '\\n')
+    sys.stdout.flush()</div>
+<div class="doc-h2">Phase switch rules</div>
+<div class="doc-code">Return 'yellow'      → triggers 3s yellow, then auto-switches phase
+Return current_phase → keeps current phase
+Return other phase   → switches immediately (no yellow) [not recommended]</div>`,
+
+  metrics: `
+<div class="doc-h1">Metrics & Scoring</div>
+<div class="doc-h2">Metrics</div>
+<div class="doc-code">total_delay     : Sum of per-step waiting time on all incoming edges (s)
+throughput      : Total vehicles arrived at destination
+max_queue_depth : Peak halting vehicles across all approaches</div>
+<div class="doc-h2">Score formula</div>
+<div class="doc-code">avg_delay = total_delay / 3600          # per-tick average
+score     = max(0, min(100, 100 - avg_delay / 10))
+final     = mean(score_level1 .. score_level5)</div>
+<div class="doc-h2">Levels</div>
+<div class="doc-code">Level 1 — Low Traffic    spawn_rate=0.10, bus_ratio=0.05
+Level 2 — Light Traffic  spawn_rate=0.25, bus_ratio=0.075
+Level 3 — Balanced       spawn_rate=0.40, bus_ratio=0.10
+Level 4 — Heavy Traffic  spawn_rate=0.60, bus_ratio=0.15
+Level 5 — Rush Hour      spawn_rate=0.80, bus_ratio=0.20</div>`
+};
+
+function showSetupPage(name, el) {
+  document.getElementById('setup-content').innerHTML = SETUP_PAGES[name] || '';
+  document.querySelectorAll('.setup-nav-item').forEach(i=>i.classList.remove('active'));
+  el.classList.add('active');
+}
+showSetupPage('overview', document.querySelector('.setup-nav-item'));
+</script>
+</body>
+</html>

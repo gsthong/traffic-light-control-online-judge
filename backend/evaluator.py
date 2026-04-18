@@ -392,7 +392,7 @@ class SumoSimulationEngine:
                     color = self.traci.vehicle.getColor(vid)
                 except Exception:
                     color = None
-                angle_rad = float(math.pi / 2 - math.radians(ang_deg))
+                angle_rad = float(math.pi - math.radians(ang_deg))
                 color_str = (
                     f"rgb({int(color[0])},{int(color[1])},{int(color[2])})"
                     if color
