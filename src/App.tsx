@@ -5,13 +5,11 @@ import { Play, Pause, RotateCcw, ChevronRight, Activity, Zap, Trophy, Users, Loa
 
 interface VehicleReplay {
   id: string;
-  x: number;
-  y: number;
-  px?: number;
-  py?: number;
-  road: string;
+  px: number;
+  py: number;
   angle: number;
   color?: string;
+  vtype?: string;  // "car" | "bus" — from SUMO getTypeID
 }
 
 interface TickFrame {
@@ -45,8 +43,13 @@ interface EvalDetail {
   status: string;
   score: number;
   total_delay: number;
+  avg_delay_per_vehicle?: number;
   max_queue_length: number;
   throughput: number;
+  total_spawned?: number;
+  delay_score?: number;
+  throughput_score?: number;
+  queue_score?: number;
   error?: string;
   error_log?: string;
   replay_data?: TickFrame[];
@@ -211,41 +214,57 @@ function drawVehicles(ctx: CanvasRenderingContext2D, vehicles: VehicleReplay[]) 
   for (const v of vehicles) {
     ctx.save();
 
-    let canvasX: number;
-    let canvasY: number;
     const hasPx =
       typeof v.px === 'number' &&
       typeof v.py === 'number' &&
       Number.isFinite(v.px) &&
       Number.isFinite(v.py);
 
-    if (hasPx) {
-      canvasX = v.px!;
-      canvasY = v.py!;
-    } else {
-      const x = Number(v.x);
-      const y = Number(v.y);
-      if (Number.isNaN(x) || Number.isNaN(y)) { ctx.restore(); continue; }
-      canvasX = CENTER_X + x * SCALE;
-      canvasY = CENTER_Y + y * SCALE;
-    }
+    if (!hasPx) { ctx.restore(); continue; }
 
-    ctx.translate(canvasX, canvasY);
+    ctx.translate(v.px, v.py);
     const ang = typeof v.angle === 'number' && !Number.isNaN(v.angle) ? v.angle : 0;
     ctx.rotate(ang);
 
-    const bw = 8, bh = 14;
-    ctx.fillStyle = v.color || '#f5d000';
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 2);
-    ctx.fill();
-    ctx.stroke();
+    const isBus = v.vtype === 'bus';
 
-    // Windshield
-    ctx.fillStyle = 'rgba(200,230,255,0.5)';
-    ctx.fillRect(-bw / 2 + 1, -bh / 2 + 2, bw - 2, 3);
+    if (isBus) {
+      // Bus: 10×26px, orange-brown body, flat windshield strip
+      const bw = 10, bh = 26;
+      ctx.fillStyle = v.color || 'rgb(200,100,0)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 2);
+      ctx.fill();
+      ctx.stroke();
+      // Windshield (top)
+      ctx.fillStyle = 'rgba(180,220,255,0.45)';
+      ctx.fillRect(-bw / 2 + 1, -bh / 2 + 2, bw - 2, 4);
+      // Rear window (bottom)
+      ctx.fillStyle = 'rgba(180,220,255,0.25)';
+      ctx.fillRect(-bw / 2 + 1, bh / 2 - 5, bw - 2, 3);
+      // Middle divider line (bus door area)
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(-bw / 2 + 1, 2);
+      ctx.lineTo(bw / 2 - 1, 2);
+      ctx.stroke();
+    } else {
+      // Car: 7×13px, yellow body
+      const bw = 7, bh = 13;
+      ctx.fillStyle = v.color || '#f5d000';
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 2);
+      ctx.fill();
+      ctx.stroke();
+      // Windshield
+      ctx.fillStyle = 'rgba(200,230,255,0.5)';
+      ctx.fillRect(-bw / 2 + 1, -bh / 2 + 2, bw - 2, 3);
+    }
 
     ctx.restore();
   }
@@ -781,20 +800,42 @@ export default function App() {
                       const sc   = d.score ?? 0;
                       const barColor = sc >= 75 ? vars.green : sc >= 50 ? vars.amber : vars.red;
                       const can  = Boolean(d.replay_data && d.replay_data.length > 0);
+                      const ds = d.delay_score ?? null;
+                      const ts = d.throughput_score ?? null;
+                      const qs = d.queue_score ?? null;
                       return (
-                        <div key={i} onClick={() => can && selectEvalReplay(d)} style={{ marginBottom: 8, cursor: can ? 'pointer' : 'default' }}>
+                        <div key={i} onClick={() => can && selectEvalReplay(d)} style={{ marginBottom: 10, cursor: can ? 'pointer' : 'default' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
                             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text1 }}>L{d.level} {name}</span>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: vars.text2 }}>{sc}</span>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 600, color: barColor }}>{sc}</span>
                               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, padding: '1px 5px', borderRadius: 2, background: d.status === 'OK' ? vars.greenDim : vars.redDim, color: d.status === 'OK' ? vars.green : vars.red, border: `1px solid ${d.status === 'OK' ? vars.green : vars.red}` }}>
                                 {d.status}
                               </span>
                             </div>
                           </div>
-                          <div style={{ height: 3, background: vars.bg3, borderRadius: 2, overflow: 'hidden' }}>
+                          {/* composite score bar */}
+                          <div style={{ height: 3, background: vars.bg3, borderRadius: 2, overflow: 'hidden', marginBottom: ds !== null ? 5 : 0 }}>
                             <div style={{ height: '100%', width: `${Math.min(100, sc)}%`, background: barColor, borderRadius: 2, transition: 'width .4s' }} />
                           </div>
+                          {/* sub-score breakdown */}
+                          {ds !== null && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              {([
+                                { label: 'Delay ×0.6',      val: ds, color: vars.blue },
+                                { label: 'Throughput ×0.3', val: ts ?? 0, color: vars.green },
+                                { label: 'Queue ×0.1',      val: qs ?? 0, color: vars.amber },
+                              ] as { label: string; val: number; color: string }[]).map(({ label, val, color }) => (
+                                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 8, color: vars.text2, width: 90, flexShrink: 0 }}>{label}</span>
+                                  <div style={{ flex: 1, height: 2, background: vars.bg3, borderRadius: 1, overflow: 'hidden' }}>
+                                    <div style={{ height: '100%', width: `${Math.min(100, val)}%`, background: color, borderRadius: 1 }} />
+                                  </div>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 8, color, width: 24, textAlign: 'right' }}>{val}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           {d.error && d.status !== 'OK' && (
                             <div style={{ marginTop: 4, fontSize: 9, fontFamily: "'IBM Plex Mono', monospace", color: vars.red }}>{d.error}</div>
                           )}

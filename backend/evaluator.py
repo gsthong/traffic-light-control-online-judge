@@ -165,8 +165,8 @@ class SumoSimulationEngine:
         nod_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <nodes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/nodes_file.xsd">
     <node id="C" x="0.0" y="0.0" type="traffic_light"/>
-    <node id="N" x="0.0" y="-500.0" type="priority"/>
-    <node id="S" x="0.0" y="500.0" type="priority"/>
+    <node id="N" x="0.0" y="500.0" type="priority"/>
+    <node id="S" x="0.0" y="-500.0" type="priority"/>
     <node id="E" x="500.0" y="0.0" type="priority"/>
     <node id="W" x="-500.0" y="0.0" type="priority"/>
 </nodes>"""
@@ -346,10 +346,16 @@ class SumoSimulationEngine:
         except (self.traci.TraCIException, TypeError, ValueError):
             throughput = 0
 
+        try:
+            spawned = int(self.traci.simulation.getDepartedNumber())
+        except (self.traci.TraCIException, TypeError, ValueError):
+            spawned = 0
+
         return {
             "total_delay": float(round(total_delay, 4)),
             "max_queue_length": int(max_queue),
             "throughput": int(throughput),
+            "spawned": int(spawned),
         }
 
     def get_replay_frame(
@@ -362,7 +368,7 @@ class SumoSimulationEngine:
 
         if state.startswith("G"):
             lights = {"N": "G", "S": "G", "E": "r", "W": "r"}
-        elif state.startswith("g"):
+        elif "G" in state:  # EW green: state = "r...G..."
             lights = {"N": "r", "S": "r", "E": "G", "W": "G"}
         else:
             lights = {"N": "y", "S": "y", "E": "y", "W": "y"}
@@ -392,23 +398,29 @@ class SumoSimulationEngine:
                     color = self.traci.vehicle.getColor(vid)
                 except Exception:
                     color = None
-                angle_rad = float(math.pi - math.radians(ang_deg))
+                try:
+                    vtype = self.traci.vehicle.getTypeID(vid)  # "car" or "bus"
+                except Exception:
+                    vtype = "car"
+                # SUMO angle: 0=North, clockwise. Canvas: y-down, rotate clockwise.
+                # With Y-flip (py = cy0 - y*scale), angle maps directly: radians(ang_deg)
+                angle_rad = float(math.radians(ang_deg))
                 color_str = (
                     f"rgb({int(color[0])},{int(color[1])},{int(color[2])})"
                     if color
                     else "rgb(255,214,0)"
                 )
                 px = cx0 + x * REPLAY_SCALE_PX_PER_M
-                py = cy0 + y * REPLAY_SCALE_PX_PER_M
+                py = cy0 - y * REPLAY_SCALE_PX_PER_M  # flip Y: SUMO y-up → canvas y-down
                 vehicles.append(
                     {
                         "id": str(vid),
-                        "x": round(x, 4),
-                        "y": round(y, 4),
-                        "px": round(px, 2),
-                        "py": round(py, 2),
-                        "angle": round(angle_rad, 4),
+                        # px/py are canvas coords; raw x/y omitted to reduce payload size.
+                        "px": round(px, 1),
+                        "py": round(py, 1),
+                        "angle": round(angle_rad, 3),
                         "color": color_str,
+                        "vtype": vtype,
                     }
                 )
         except self.traci.TraCIException:
@@ -508,6 +520,7 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
         cumulative_delay = 0.0
         peak_queue = 0
         total_throughput = 0
+        total_spawned = 0
         replay_frames: List[Dict[str, Any]] = []
 
         for tick in range(1, TOTAL_TICKS + 1):
@@ -602,6 +615,9 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                 new_duration = action.get("duration")
                 if new_duration is not None and isinstance(new_duration, (int, float)):
                     phase_duration = max(1, int(new_duration))
+            elif cmd not in ("GIU_NGUYEN", "CHUYEN_PHA"):
+                # Invalid action string from contestant → silently ignore, treat as GIU_NGUYEN
+                pass
 
             phase_timer += 1
             if phase_timer >= phase_duration:
@@ -639,6 +655,7 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
             cumulative_delay += metrics["total_delay"]
             peak_queue = max(peak_queue, metrics["max_queue_length"])
             total_throughput += metrics["throughput"]
+            total_spawned += metrics["spawned"]
 
     except Exception as e:
         return {
@@ -664,8 +681,23 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
             except Exception:
                 proc.kill()
 
-    avg_delay = cumulative_delay / TOTAL_TICKS if TOTAL_TICKS > 0 else 0
-    score = max(0.0, min(100.0, 100.0 - (avg_delay / 10.0)))
+    # ── Multi-metric Scoring ─────────────────────────────────────────────────────
+
+    # 1. Delay score (60%) — average delay per vehicle that completed the trip.
+    #    ≤10 s  → ~93 pts (excellent),  ≥95 s → ~37 pts,  ≥150 s → 0 pts.
+    avg_delay_per_vehicle = cumulative_delay / max(total_throughput, 1)
+    delay_score = max(0.0, min(100.0, 100.0 - (avg_delay_per_vehicle / 1.5)))
+
+    # 2. Throughput score (30%) — fraction of spawned vehicles that cleared the junction.
+    throughput_score = min(100.0, (total_throughput / max(total_spawned, 1)) * 100.0)
+
+    # 3. Queue score (10%) — penalise starvation / long jams.
+    #    Peak queue of 0 → 100 pts,  ≥50 → 0 pts.
+    queue_score = max(0.0, min(100.0, 100.0 - (peak_queue * 2.0)))
+
+    score = round(
+        (0.6 * delay_score) + (0.3 * throughput_score) + (0.1 * queue_score), 2
+    )
 
     return {
         "level": level,
@@ -675,9 +707,15 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
         "status": "OK",
         "ticks_completed": TOTAL_TICKS,
         "total_delay": float(round(cumulative_delay, 2)),
+        "avg_delay_per_vehicle": float(round(avg_delay_per_vehicle, 2)),
         "max_queue_length": int(peak_queue),
         "throughput": int(total_throughput),
-        "score": float(round(score, 2)),
+        "total_spawned": int(total_spawned),
+        # Sub-scores for UI breakdown
+        "delay_score":      float(round(delay_score, 1)),
+        "throughput_score": float(round(throughput_score, 1)),
+        "queue_score":      float(round(queue_score, 1)),
+        "score": float(score),
         "replay_data": replay_frames,
     }
 
