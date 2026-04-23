@@ -1,5 +1,0 @@
-{
-  "name": "Traffic Light Control Online Judge",
-  "description": "A high-performance online judge for traffic light control algorithms using FastAPI and CityFlow.",
-  "requestFramePermissions": []
-}

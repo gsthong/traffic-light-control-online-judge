@@ -1,3 +1,0 @@
-{
-  "code": "def control(queues, current_phase, phase_timer):\n    return current_phase"
-}
