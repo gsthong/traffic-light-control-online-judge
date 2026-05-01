@@ -60,6 +60,121 @@ SCENARIO_CONFIGS = {
 
 DEFAULT_LEVEL = 3
 
+SIMULATION_STATE_SCHEMA = {
+    "tick": "int: current simulation tick, 1..3600",
+    "phase": "str: NS or EW; last green phase while yellow is active",
+    "phase_timer": "int: seconds elapsed in current signal phase",
+    "vehicles": "list[dict]: sensor observations for this tick",
+}
+
+SIMULATION_VEHICLE_SCHEMA = {
+    "dir": "str: Bắc, Nam, Đông, Tây",
+    "lane": "str: L or R",
+    "length_m": "float: vehicle length in metres",
+    "speed_ms": "float: vehicle speed in metres/second",
+    "type": "str: car or bus",
+}
+
+SIMULATION_OUTPUT_SCHEMA = {
+    "action": "str: GIU_NGUYEN or CHUYEN_PHA",
+    "duration": "optional int: requested phase duration in seconds",
+}
+
+SIMULATION_METRIC_SCHEMA = {
+    "total_delay": "sum of per-tick waiting seconds on incoming edges",
+    "avg_delay_per_vehicle": "total_delay / completed vehicles",
+    "max_queue_length": "peak halted vehicles across incoming edges",
+    "throughput": "completed vehicles",
+    "total_spawned": "departed vehicles",
+    "score": "0.6 delay + 0.3 throughput + 0.1 queue",
+}
+
+SIMULATION_TEST_SCHEMA = {
+    "public": [1, 2, 3],
+    "private": [4, 5],
+    "default": DEFAULT_LEVEL,
+}
+
+
+def get_simulation_contract() -> Dict[str, Any]:
+    """Machine-readable Simulation contract: State, Output, Metric, Test."""
+    return {
+        "state": SIMULATION_STATE_SCHEMA,
+        "vehicle": SIMULATION_VEHICLE_SCHEMA,
+        "output": SIMULATION_OUTPUT_SCHEMA,
+        "metric": SIMULATION_METRIC_SCHEMA,
+        "test": SIMULATION_TEST_SCHEMA,
+        "scenarios": SCENARIO_CONFIGS,
+    }
+
+
+def validate_simulation_state(payload: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(payload.get("tick"), int):
+        errors.append("tick must be int")
+    if payload.get("phase") not in ("NS", "EW"):
+        errors.append("phase must be 'NS' or 'EW'")
+    if not isinstance(payload.get("phase_timer"), int):
+        errors.append("phase_timer must be int")
+    vehicles = payload.get("vehicles")
+    if not isinstance(vehicles, list):
+        return errors + ["vehicles must be list"]
+    for i, v in enumerate(vehicles):
+        if not isinstance(v, dict):
+            errors.append(f"vehicles[{i}] must be dict")
+            continue
+        if v.get("dir") not in ("Bắc", "Nam", "Đông", "Tây"):
+            errors.append(f"vehicles[{i}].dir invalid")
+        if v.get("lane") not in ("L", "R"):
+            errors.append(f"vehicles[{i}].lane invalid")
+        if not isinstance(v.get("length_m"), (int, float)):
+            errors.append(f"vehicles[{i}].length_m must be number")
+        if not isinstance(v.get("speed_ms"), (int, float)):
+            errors.append(f"vehicles[{i}].speed_ms must be number")
+        if v.get("type") not in ("car", "bus"):
+            errors.append(f"vehicles[{i}].type invalid")
+    return errors
+
+
+def validate_simulation_output(action: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(action, dict):
+        return ["output must be dict"]
+    if action.get("action") not in ("GIU_NGUYEN", "CHUYEN_PHA"):
+        errors.append("action must be GIU_NGUYEN or CHUYEN_PHA")
+    duration = action.get("duration")
+    if duration is not None and not isinstance(duration, (int, float)):
+        errors.append("duration must be number when provided")
+    return errors
+
+
+def run_simulation_contract_tests() -> Dict[str, Any]:
+    sample_state = {
+        "tick": 1,
+        "phase": "NS",
+        "phase_timer": 0,
+        "vehicles": [
+            {
+                "dir": "Bắc",
+                "lane": "L",
+                "length_m": 5.0,
+                "speed_ms": 12.5,
+                "type": "car",
+            }
+        ],
+    }
+    sample_output = {"action": "GIU_NGUYEN"}
+    state_errors = validate_simulation_state(sample_state)
+    output_errors = validate_simulation_output(sample_output)
+    return {
+        "status": "OK" if not state_errors and not output_errors else "FAILED",
+        "contract": get_simulation_contract(),
+        "sample_state": sample_state,
+        "sample_output": sample_output,
+        "state_errors": state_errors,
+        "output_errors": output_errors,
+    }
+
 
 def generate_rou_xml(level_config: Dict[str, Any]) -> str:
     spawn_rate = level_config["spawn_rate"]
@@ -751,7 +866,25 @@ if __name__ == "__main__":
         choices=sorted(SCENARIO_CONFIGS.keys()),
         help="Difficulty level 1-5",
     )
+    parser.add_argument(
+        "--contract",
+        action="store_true",
+        help="Print Simulation State/Output/Metric/Test contract and exit",
+    )
+    parser.add_argument(
+        "--contract-test",
+        action="store_true",
+        help="Run offline schema checks for Simulation input/output and exit",
+    )
     args = parser.parse_args()
+
+    if args.contract:
+        print(json.dumps(get_simulation_contract(), ensure_ascii=False, separators=(",", ":")))
+        sys.exit(0)
+
+    if args.contract_test:
+        print(json.dumps(run_simulation_contract_tests(), ensure_ascii=False, separators=(",", ":")))
+        sys.exit(0)
 
     result = evaluate(args.solution, level=args.level)
     print(json.dumps(result, separators=(",", ":")))
