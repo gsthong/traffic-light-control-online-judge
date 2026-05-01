@@ -300,25 +300,31 @@ html, body { height: 100%; background: var(--bg0); color: var(--text0); font-fam
       <div id="code-area">
         <textarea id="code-input" spellcheck="false"># Traffic Light Controller
 # ─────────────────────────────────────────────────────────
-# Called every simulation tick by SUMO via TraCI.
-#
 # Arguments:
-#   queues       : dict  — {N, S, E, W}  vehicle counts waiting
-#   current_phase: str   — 'NS' or 'EW'
-#   phase_timer  : float — seconds elapsed in current phase
-#
-# Return values:
-#   'NS'     → keep / switch to N-S green
-#   'EW'     → keep / switch to E-W green
-#   'yellow' → trigger yellow transition (platform handles timing)
+#   vehicles     : list  — xe cam bien phat hien trong tick nay
+#                  dir      : 'Bac' | 'Nam' | 'Dong' | 'Tay'
+#                  lane     : 'L' | 'R'
+#                  length_m : float   speed_ms : float
+#                  type     : 'car' | 'bus'
+#   current_phase: 'NS' | 'EW'
+#   phase_timer  : float — so giay da troi qua trong pha hien tai
+# Return: 'NS', 'EW', hoac 'yellow'
 # ─────────────────────────────────────────────────────────
 
-def control(queues, current_phase, phase_timer):
+def control(vehicles, current_phase, phase_timer):
+    # Dem xe theo huong tu cam bien
+    ns = sum(1 for v in vehicles if v['dir'] in ('Bac', 'Nam'))
+    ew = sum(1 for v in vehicles if v['dir'] in ('Dong', 'Tay'))
+
     if current_phase == 'NS':
-        if phase_timer >= 30:
+        if phase_timer < 15:          # giu it nhat 15s
+            return current_phase
+        if ew > ns + 2 or phase_timer >= 35:
             return 'yellow'
-    elif current_phase == 'EW':
-        if phase_timer >= 20:
+    else:
+        if phase_timer < 10:
+            return current_phase
+        if ns > ew + 2 or phase_timer >= 25:
             return 'yellow'
     return current_phase
 </textarea>
@@ -395,10 +401,10 @@ def control(queues, current_phase, phase_timer):
         <div style="margin-top:20px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:4px">
           <div class="sb-label" style="margin-bottom:8px">Hint</div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.8">
-            Compare queue sums:<br>
-            if queues['N'] + queues['S']<br>
-            &gt; queues['E'] + queues['W']:<br>
-            &nbsp;&nbsp;bias toward NS phase
+            Count sensor vehicles:<br>
+            ns = sum(1 for v in vehicles<br>
+            &nbsp;&nbsp;if v['dir'] in ('Bac','Nam'))<br>
+            &nbsp;&nbsp;bias NS if ns &gt; ew
           </div>
         </div>
       </div>
@@ -464,6 +470,9 @@ let phase = 'NS', phaseTimer = 0, inYellow = false, yellowTimer = 0;
 let vehicles = [], vid = 0, throughput = 0, totalWait = 0, waitCount = 0;
 let lastTs = null, spawnAcc = {N:0,S:0,E:0,W:0};
 let userScore = null, numSubmits = 0;
+// Replay mode — populated after backend submit
+let replayFrames = [], replayIdx = 0, replayMode = false;
+const REPLAY_SCALE = 680 / 520; // evaluator uses 520×520 canvas
 const DIRS = ['N','S','E','W'];
 const PHASE_DIRS = {NS:['N','S'], EW:['E','W']};
 const YELLOW_DUR = 3;
@@ -484,13 +493,15 @@ function canGo(dir) {
 }
 
 function spawnVehicle(dir) {
-  const spd = (1.0 + Math.random()*0.5) * 1.3;
+  const isBus = Math.random() < 0.12;
+  const spd = (1.0 + Math.random()*0.5) * (isBus ? 0.9 : 1.3);
   let x, y, vx, vy;
   if(dir==='N') { x=CX+LANE/2; y=H+28; vx=0; vy=-spd; }
   else if(dir==='S') { x=CX-LANE/2; y=-28; vx=0; vy=spd; }
   else if(dir==='E') { x=-28; y=CY-LANE/2; vx=spd; vy=0; }
   else { x=W+28; y=CY+LANE/2; vx=-spd; vy=0; }
-  vehicles.push({id:vid++, dir, x, y, vx, vy, state:'moving', waitTime:0, color:CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)]});
+  const color = isBus ? 'rgb(200,100,0)' : CAR_COLORS[Math.floor(Math.random()*CAR_COLORS.length)];
+  vehicles.push({id:vid++, dir, x, y, vx, vy, state:'moving', waitTime:0, color, type: isBus?'bus':'car', bw: isBus?11:9, bh: isBus?24:16});
 }
 
 function updateVehicles(dt) {
@@ -561,9 +572,14 @@ function getQueues() { return {N:queueCount('N'),S:queueCount('S'),E:queueCount(
 // ── DRAW ──
 function draw() {
   ctx.clearRect(0,0,W,H);
-  drawRoad();
-  drawLights();
-  drawVehicles_sim();
+  if(replayMode && replayFrames.length > 0) {
+    const frame = replayFrames[Math.min(Math.floor(replayIdx), replayFrames.length-1)];
+    drawReplayFrame(frame);
+  } else {
+    drawRoad();
+    drawLights();
+    drawVehicles_sim();
+  }
 }
 
 function drawRoad() {
@@ -641,13 +657,77 @@ function drawVehicles_sim() {
     else if(v.dir==='S') ctx.rotate(0);
     else if(v.dir==='E') ctx.rotate(Math.PI/2);
     else                 ctx.rotate(-Math.PI/2);
-    const bw=9, bh=16;
+    const bw=v.bw||9, bh=v.bh||16;
     ctx.fillStyle = v.color;
-    ctx.beginPath(); ctx.roundRect(-bw/2,-bh/2,bw,bh,2); ctx.fill();
-    ctx.fillStyle = 'rgba(200,230,255,0.55)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(-bw/2,-bh/2,bw,bh,2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = v.type==='bus' ? 'rgba(180,220,255,0.45)' : 'rgba(200,230,255,0.55)';
     ctx.fillRect(-bw/2+1,-bh/2+2,bw-2,4);
+    if(v.type==='bus') {
+      ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.5;
+      ctx.beginPath(); ctx.moveTo(-bw/2+1,2); ctx.lineTo(bw/2-1,2); ctx.stroke();
+    }
     ctx.restore();
   }
+}
+
+function drawReplayVehicle(px, py, angle, color, vtype) {
+  ctx.save(); ctx.translate(px, py); ctx.rotate(angle);
+  const isBus = vtype==='bus';
+  const bw=isBus?13:9, bh=isBus?26:16;
+  ctx.fillStyle = color || (isBus?'rgb(200,100,0)':'#f5d000');
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(-bw/2,-bh/2,bw,bh,2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = isBus?'rgba(180,220,255,0.45)':'rgba(200,230,255,0.5)';
+  ctx.fillRect(-bw/2+1,-bh/2+2,bw-2,4);
+  if(isBus) {
+    ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=0.5;
+    ctx.beginPath(); ctx.moveTo(-bw/2+1,2); ctx.lineTo(bw/2-1,2); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawReplayFrame(frame) {
+  // Road background
+  ctx.fillStyle='#1a1f1a'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#2a2a2a';
+  ctx.fillRect(CX-ROAD,0,ROAD*2,H); ctx.fillRect(0,CY-ROAD,W,ROAD*2);
+  // Queue tints
+  const q=frame.queues||{N:0,S:0,E:0,W:0};
+  function qt(x,y,w,h,c){if(c<2)return;ctx.fillStyle=`rgba(255,69,69,${Math.min(0.35,c/12)})`;ctx.fillRect(x,y,w,h);}
+  qt(CX,CY+ROAD,ROAD,H-CY-ROAD,q.N); qt(CX-ROAD,0,ROAD,CY-ROAD,q.S);
+  qt(0,CY-ROAD,CX-ROAD,ROAD,q.E); qt(CX+ROAD,CY,W-CX-ROAD,ROAD,q.W);
+  // Centre dashes
+  ctx.strokeStyle='#444'; ctx.lineWidth=1; ctx.setLineDash([10,12]);
+  ctx.beginPath(); ctx.moveTo(CX,0); ctx.lineTo(CX,CY-ROAD); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX,CY+ROAD); ctx.lineTo(CX,H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,CY); ctx.lineTo(CX-ROAD,CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+ROAD,CY); ctx.lineTo(W,CY); ctx.stroke();
+  ctx.setLineDash([]);
+  // Stop lines
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(CX,CY+ROAD+2); ctx.lineTo(CX+ROAD,CY+ROAD+2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX-ROAD,CY-ROAD-2); ctx.lineTo(CX,CY-ROAD-2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX-ROAD-2,CY-ROAD); ctx.lineTo(CX-ROAD-2,CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX+ROAD+2,CY); ctx.lineTo(CX+ROAD+2,CY+ROAD); ctx.stroke();
+  // Labels
+  ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.font='12px IBM Plex Mono,monospace'; ctx.textAlign='center';
+  ctx.fillText('N',CX+LANE/2,18); ctx.fillText('S',CX-LANE/2,H-8);
+  ctx.fillText('W',18,CY+LANE/2+14); ctx.fillText('E',W-18,CY-LANE/2-4);
+  // Traffic lights — temporarily set globals for drawSignalBox
+  const _p=phase,_iy=inYellow;
+  phase=frame.phase||'NS'; inYellow=frame.in_yellow||false;
+  drawSignalBox(CX+ROAD+10,CY+ROAD+10,true); drawSignalBox(CX-ROAD-10,CY-ROAD-10,true);
+  drawSignalBox(CX-ROAD-10,CY+ROAD+10,false); drawSignalBox(CX+ROAD+10,CY-ROAD-10,false);
+  phase=_p; inYellow=_iy;
+  // Vehicles
+  for(const v of (frame.vehicles||[])) drawReplayVehicle(v.px*REPLAY_SCALE,v.py*REPLAY_SCALE,v.angle,v.color,v.vtype);
+  // HUD
+  ctx.fillStyle='rgba(200,255,0,0.85)'; ctx.font='10px IBM Plex Mono,monospace';
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  const phStr=frame.in_yellow?'YELLOW':`${frame.phase} GREEN`;
+  ctx.fillText(`Tick ${frame.tick} | ${(frame.vehicles||[]).length} veh | ${phStr}`,10,10);
+  ctx.textBaseline='alphabetic';
 }
 
 // ── UI UPDATES ──
@@ -703,11 +783,25 @@ function loop(ts) {
   const dt = Math.min((ts-lastTs)/1000, 0.05);
   lastTs = ts;
   if(running) {
-    simTime += dt * simSpeed;
-    spawnStep(dt);
-    updateVehicles(dt);
-    stepPhase(dt);
-    updateMetricsUI();
+    if(replayMode && replayFrames.length > 0) {
+      replayIdx += dt * simSpeed * 4; // ~4 frames/s at speed 1x
+      if(replayIdx >= replayFrames.length) {
+        replayIdx = replayFrames.length - 1;
+        running = false;
+        document.getElementById('btn-pp').textContent='Play';
+        document.getElementById('btn-pp').className='btn primary';
+        addLog('Replay finished','info');
+      }
+      // Sync phase UI from frame
+      const f = replayFrames[Math.floor(replayIdx)];
+      if(f) { phase=f.phase||'NS'; inYellow=f.in_yellow||false; }
+    } else {
+      simTime += dt * simSpeed;
+      spawnStep(dt);
+      updateVehicles(dt);
+      stepPhase(dt);
+      updateMetricsUI();
+    }
   }
   draw();
   updateSignalUI();
@@ -725,6 +819,7 @@ function togglePlay() {
 
 function resetSim() {
   running = false;
+  replayMode = false; replayFrames = []; replayIdx = 0;
   vehicles = []; vid=0; throughput=0; totalWait=0; waitCount=0;
   phase='NS'; phaseTimer=0; yellowTimer=0; inYellow=false; simTime=0;
   spawnAcc={N:0,S:0,E:0,W:0};
@@ -774,7 +869,7 @@ function parseController(code) {
   const ewM = code.match(/current_phase\s*==\s*['"]EW['"]\s*[\s\S]*?phase_timer\s*>=\s*(\d+)/);
   if(nsM) nsTime=+nsM[1];
   if(ewM) ewTime=+ewM[1];
-  const isAdaptive = code.includes('queues') && /['"][NSEW]['"]\]/.test(code);
+  const isAdaptive = code.includes('vehicles') && (code.includes("for v in vehicles") || code.includes("v['dir']") || code.includes('count'));
   const isWeighted = (code.includes('+')||code.includes('sum')||code.includes('total')) && isAdaptive;
   const minGreenMatch = code.match(/phase_timer\s*[<>]=?\s*(\d+)/g);
   const minGreen = minGreenMatch ? Math.min(...minGreenMatch.map(m=>+m.replace(/[^0-9]/g,''))) : 0;
@@ -939,6 +1034,15 @@ async function runJudge() {
         }
         document.getElementById('judge-notes').textContent =
           'Evaluated via SUMO / TraCI. Results reflect real traffic physics.';
+        // Load replay from first level that has data
+        const allDetails = data.details || data.scenarios || [];
+        const firstR = allDetails.find(d => d.replay_data && d.replay_data.length > 0);
+        if(firstR) {
+          replayFrames = firstR.replay_data;
+          replayIdx = 0; replayMode = true; running = false;
+          switchTab('sim', document.querySelector('.tab'));
+          addLog('SUMO replay: ' + (firstR.level_label||'Level '+firstR.level) + ' — ' + replayFrames.length + ' frames', 'info');
+        }
         judgeRunning = false;
         btnJudge.textContent = 'Run Judge (5 scenarios)';
         btnJudge.disabled    = false;
@@ -967,9 +1071,9 @@ async function runJudge() {
   const avg = totalScore / LOCAL_SCENARIOS.length;
   const ctrl_strat = ctrl.isWeighted?'Weighted adaptive':ctrl.isAdaptive?'Adaptive':'Fixed-time';
   let notes = ctrl.isAdaptive
-    ? 'Adaptive controller detected. Bonus applied for queue data.\n'
-    : 'Fixed-time controller. Tip: use queue lengths to adapt timing.\n';
-  if(!ctrl.isWeighted && ctrl.isAdaptive) notes += 'Try weighting N+S vs E+W sums.\n';
+    ? 'Adaptive controller detected. Bonus applied for sensor vehicle data.\n'
+    : 'Fixed-time controller. Tip: count vehicles by dir to adapt timing.\n';
+  if(!ctrl.isWeighted && ctrl.isAdaptive) notes += 'Try weighting Bac+Nam vs Dong+Tay counts.\n';
   if(avg>=75) notes+='Strong result! Start backend for SUMO scores.';
   else if(avg>=50) notes+='Decent. Try running with the SUMO backend for real results.';
   else notes+='Review phase switch logic. Start the Python backend for accurate scoring.';
@@ -983,7 +1087,8 @@ async function runJudge() {
 
 const EXAMPLES = {
   fixed: `# Fixed-time controller (baseline)
-def control(queues, current_phase, phase_timer):
+# vehicles: list of {dir, lane, length_m, speed_ms, type}
+def control(vehicles, current_phase, phase_timer):
     if current_phase == 'NS':
         if phase_timer >= 30:
             return 'yellow'
@@ -992,10 +1097,14 @@ def control(queues, current_phase, phase_timer):
             return 'yellow'
     return current_phase`,
 
-  adaptive: `# Adaptive controller
-def control(queues, current_phase, phase_timer):
-    ns_total = queues['N'] + queues['S']
-    ew_total = queues['E'] + queues['W']
+  adaptive: `# Adaptive controller — dem xe theo huong tu cam bien
+def control(vehicles, current_phase, phase_timer):
+    count = {'Bac': 0, 'Nam': 0, 'Dong': 0, 'Tay': 0}
+    for v in vehicles:
+        count[v['dir']] = count.get(v['dir'], 0) + 1
+
+    ns_total = count['Bac'] + count['Nam']
+    ew_total = count['Dong'] + count['Tay']
 
     if current_phase == 'NS':
         green_time = 25 + min(15, ns_total * 2)
@@ -1011,21 +1120,28 @@ def control(queues, current_phase, phase_timer):
             return 'yellow'
     return current_phase`,
 
-  demand: `# Demand-based controller
-def control(queues, current_phase, phase_timer):
-    ns = queues['N'] + queues['S']
-    ew = queues['E'] + queues['W']
+  demand: `# Demand-based + uu tien bus
+def control(vehicles, current_phase, phase_timer):
+    ns, ew, ns_bus, ew_bus = 0, 0, 0, 0
+    for v in vehicles:
+        is_bus = v['type'] == 'bus'
+        if v['dir'] in ('Bac', 'Nam'):
+            ns += 1
+            if is_bus: ns_bus += 1
+        else:
+            ew += 1
+            if is_bus: ew_bus += 1
 
     if phase_timer < 12:
         return current_phase
 
     if current_phase == 'NS':
-        if ew > ns * 1.8 and phase_timer > 15:
+        if (ew > ns * 1.8 or ew_bus > 0) and phase_timer > 15:
             return 'yellow'
         if phase_timer >= 35:
             return 'yellow'
     else:
-        if ns > ew * 1.8 and phase_timer > 12:
+        if (ns > ew * 1.8 or ns_bus > 0) and phase_timer > 12:
             return 'yellow'
         if phase_timer >= 28:
             return 'yellow'
@@ -1106,7 +1222,7 @@ conn.trafficlight.setRedYellowGreenState("C", state_string)
 <div class="doc-h2">Endpoint</div>
 <div class="doc-code">POST http://localhost:8000/evaluate
 Content-Type: application/json
-{ "code": "def control(queues, current_phase, phase_timer):\\n    ..." }
+{ "code": "def control(vehicles, current_phase, phase_timer):\\n    ..." }
 
 Response:
 {
@@ -1126,8 +1242,8 @@ Response:
     4. Launch contestant code in subprocess (sandboxed)
     5. For each tick 1..3600:
        - Step SUMO
-       - Read queues from edge halting numbers
-       - Send {tick, queues, phase, phase_timer} via stdin
+       - Read sensor events (vehicles on induction loops)
+       - Send {tick, vehicles, phase, phase_timer} via stdin
        - Read response {action} from stdout
        - Apply phase change if action == "CHUYEN_PHA"
     6. Collect metrics, compute score</div>`,
@@ -1137,8 +1253,9 @@ Response:
 <div class="doc-h2">Your solution.py template</div>
 <div class="doc-code">import sys, json
 
-def control(queues, current_phase, phase_timer):
-    # Your logic here
+def control(vehicles, current_phase, phase_timer):
+    # vehicles: list of {dir, lane, length_m, speed_ms, type}
+    # dir values: 'Bac', 'Nam', 'Dong', 'Tay'
     if current_phase == 'NS' and phase_timer >= 30:
         return 'yellow'
     if current_phase == 'EW' and phase_timer >= 20:
@@ -1148,10 +1265,10 @@ def control(queues, current_phase, phase_timer):
 # ── DO NOT EDIT BELOW ──
 for line in sys.stdin:
     d = json.loads(line)
-    queues        = d['queues']
+    vehicles      = d['vehicles']
     current_phase = d['phase']
     phase_timer   = d['phase_timer']
-    result = control(queues, current_phase, phase_timer)
+    result = control(vehicles, current_phase, phase_timer)
     action = 'CHUYEN_PHA' if result == 'yellow' else 'GIU_NGUYEN'
     sys.stdout.write(json.dumps({'action': action}) + '\\n')
     sys.stdout.flush()</div>
@@ -1187,3 +1304,4 @@ showSetupPage('overview', document.querySelector('.setup-nav-item'));
 </script>
 </body>
 </html>
+

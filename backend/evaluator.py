@@ -266,12 +266,17 @@ class SumoSimulationEngine:
         except self.traci.TraCIException:
             pass
 
+    # Map SUMO direction codes → Vietnamese names shown in the CSV spec
+    _DIR_VI = {"N": "Bắc", "S": "Nam", "E": "Đông", "W": "Tây"}
+    # Map SUMO lane index (0-based string) → L / R
+    _LANE_LR = {"0": "L", "1": "R"}
+
     def step(self, collect_sensors: bool = False) -> List[Dict]:
         self.traci.simulationStep()
 
-        sensor_events: List[Dict] = []
+        vehicles: List[Dict] = []
         if not collect_sensors:
-            return sensor_events
+            return vehicles
 
         detector_map = {
             "sensor_N": "N",
@@ -285,20 +290,26 @@ class SumoSimulationEngine:
                 for vid in vids:
                     speed = self.traci.vehicle.getSpeed(vid)
                     length = self.traci.vehicle.getLength(vid)
-                    lane = self.traci.vehicle.getLaneID(vid)
-                    sensor_events.append(
+                    lane_id = self.traci.vehicle.getLaneID(vid)
+                    # lane_id looks like "N_to_C_0" or "N_to_C_1"
+                    lane_idx = lane_id.split("_")[-1] if "_" in lane_id else "0"
+                    try:
+                        vtype = self.traci.vehicle.getTypeID(vid)  # "car" or "bus"
+                    except self.traci.TraCIException:
+                        vtype = "car"
+                    vehicles.append(
                         {
-                            "id": vid,
-                            "dir": direction,
-                            "lane": lane.split("_")[-1] if "_" in lane else "0",
-                            "speed": round(speed, 1),
-                            "length": round(length, 1),
+                            "dir": self._DIR_VI.get(direction, direction),
+                            "lane": self._LANE_LR.get(lane_idx, lane_idx),
+                            "length_m": round(length, 1),
+                            "speed_ms": round(speed, 2),
+                            "type": vtype,  # "car" or "bus"
                         }
                     )
             except self.traci.TraCIException:
                 pass
 
-        return sensor_events
+        return vehicles
 
     def get_light_states(self) -> Dict[str, Any]:
         try:
@@ -539,7 +550,7 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
             engine.set_tls_state(ns_green, ew_green)
 
             try:
-                sensor_events = engine.step()
+                sensor_events = engine.step(collect_sensors=True)
             except Exception as e:
                 proc.kill()
                 return {
@@ -568,12 +579,13 @@ def evaluate(solution_path: str, level: int = DEFAULT_LEVEL) -> Dict[str, Any]:
                     True,
                 )
 
-            # Slim IPC: wrapper only needs queues + phase + timer (saves huge JSON per tick).
+            # Slim IPC: send per-sensor vehicle list (Option A) + phase info.
+            # queues is kept internally for scoring only — not exposed to contestant.
             payload = {
                 "tick": tick,
-                "queues": queues,
                 "phase": phase_str,
                 "phase_timer": phase_timer,
+                "vehicles": sensor_events,  # list of {dir, lane, length_m, speed_ms, type}
             }
 
             try:

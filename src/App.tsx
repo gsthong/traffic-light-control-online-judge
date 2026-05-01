@@ -80,14 +80,20 @@ const STOP_LINE_M = 28;
 const DEFAULT_CODE = `# Traffic Light Controller
 # ─────────────────────────────────────────────────────────
 # Arguments:
-#   queues       : dict  — {N, S, E, W}  vehicle counts waiting
-#   current_phase: str   — 'NS' or 'EW'
-#   phase_timer  : float — seconds elapsed in current phase
+#   vehicles     : list  — xe cảm biến phát hiện trong tick này
+#                  mỗi phần tử là dict:
+#                    dir      : 'Bắc' | 'Nam' | 'Đông' | 'Tây'
+#                    lane     : 'L' | 'R'
+#                    length_m : float  — chiều dài xe (m)
+#                    speed_ms : float  — vận tốc (m/s)
+#                    type     : 'car' | 'bus'
+#   current_phase: str   — 'NS' hoặc 'EW'
+#   phase_timer  : float — số giây đã trôi qua trong pha hiện tại
 #
-# Return: 'NS', 'EW', or 'yellow'
+# Return: 'NS', 'EW', hoặc 'yellow'
 # ─────────────────────────────────────────────────────────
 
-def control(queues, current_phase, phase_timer):
+def control(vehicles, current_phase, phase_timer):
     if current_phase == 'NS':
         if phase_timer >= 30:
             return 'yellow'
@@ -306,7 +312,8 @@ function renderFrame(ctx: CanvasRenderingContext2D, frame: TickFrame | null) {
 
 const EXAMPLES: Record<string, string> = {
   fixed: `# Fixed-time controller (baseline)
-def control(queues, current_phase, phase_timer):
+# vehicles: list of {dir, lane, length_m, speed_ms, type}
+def control(vehicles, current_phase, phase_timer):
     if current_phase == 'NS':
         if phase_timer >= 30:
             return 'yellow'
@@ -315,10 +322,14 @@ def control(queues, current_phase, phase_timer):
             return 'yellow'
     return current_phase`,
 
-  adaptive: `# Adaptive controller
-def control(queues, current_phase, phase_timer):
-    ns_total = queues['N'] + queues['S']
-    ew_total = queues['E'] + queues['W']
+  adaptive: `# Adaptive controller — đếm xe theo hướng từ cảm biến
+def control(vehicles, current_phase, phase_timer):
+    count = {'Bắc': 0, 'Nam': 0, 'Đông': 0, 'Tây': 0}
+    for v in vehicles:
+        count[v['dir']] = count.get(v['dir'], 0) + 1
+
+    ns_total = count['Bắc'] + count['Nam']
+    ew_total = count['Đông'] + count['Tây']
 
     if current_phase == 'NS':
         green_time = 25 + min(15, ns_total * 2)
@@ -334,21 +345,28 @@ def control(queues, current_phase, phase_timer):
             return 'yellow'
     return current_phase`,
 
-  demand: `# Demand-based controller
-def control(queues, current_phase, phase_timer):
-    ns = queues['N'] + queues['S']
-    ew = queues['E'] + queues['W']
+  demand: `# Demand-based + ưu tiên bus
+def control(vehicles, current_phase, phase_timer):
+    ns, ew, ns_bus, ew_bus = 0, 0, 0, 0
+    for v in vehicles:
+        is_bus = v['type'] == 'bus'
+        if v['dir'] in ('Bắc', 'Nam'):
+            ns += 1
+            if is_bus: ns_bus += 1
+        else:
+            ew += 1
+            if is_bus: ew_bus += 1
 
     if phase_timer < 12:
         return current_phase
 
     if current_phase == 'NS':
-        if ew > ns * 1.8 and phase_timer > 15:
+        if (ew > ns * 1.8 or ew_bus > 0) and phase_timer > 15:
             return 'yellow'
         if phase_timer >= 35:
             return 'yellow'
     else:
-        if ns > ew * 1.8 and phase_timer > 12:
+        if (ns > ew * 1.8 or ns_bus > 0) and phase_timer > 12:
             return 'yellow'
         if phase_timer >= 28:
             return 'yellow'

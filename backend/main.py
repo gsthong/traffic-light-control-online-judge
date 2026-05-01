@@ -95,14 +95,15 @@ def _run_sandbox():
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        
+
         try:
             current_phase = data.get("phase", "NS")
             phase_timer = data.get("phase_timer", 0)
-            queues = data.get("queues", {{}})
-            
-            res = control(queues, current_phase, phase_timer)
-            
+            # vehicles: list of dicts with keys dir, lane, length_m, speed_ms, type
+            vehicles = data.get("vehicles", [])
+
+            res = control(vehicles, current_phase, phase_timer)
+
             if res == 'yellow' and current_phase != 'yellow':
                 out = {{"action": "CHUYEN_PHA", "duration": 3}}
             elif res == 'NS' and current_phase != 'NS':
@@ -113,7 +114,7 @@ def _run_sandbox():
                 out = {{"action": "GIU_NGUYEN"}}
         except Exception as e:
             out = {{"action": "GIU_NGUYEN", "error": str(e)}}
-        
+
         sys.stdout.write(json.dumps(out) + "\\n")
         sys.stdout.flush()
 
@@ -252,7 +253,8 @@ async def evaluate_submission(submission: Submission):
         return JSONResponse(status_code=400, content={"error": "No code provided"})
     if "def control" not in submission.code:
         return JSONResponse(
-            status_code=400, content={"error": "Code must define a 'control' function"}
+            status_code=400,
+            content={"error": "Code must define a 'control(vehicles, current_phase, phase_timer)' function"},
         )
 
     # ── Static security check (AST) — reject before touching SUMO ────────────
